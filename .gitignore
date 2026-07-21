@@ -1,0 +1,19 @@
+# Credenziali
+.env
+credentials.json
+
+# Ambiente virtuale
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Editor
+.vscode/
+.idea/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
