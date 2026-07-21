@@ -65,7 +65,7 @@ def get_google_credentials() -> Credentials:
     """
     Recupera le credenziali Google.
 
-    Su Koyeb:
+    Su Railway:
     usa la variabile GOOGLE_CREDENTIALS_JSON.
 
     Sul PC:
@@ -83,7 +83,6 @@ def get_google_credentials() -> Credentials:
                 "non contiene un JSON valido."
             ) from error
 
-        # Corregge eventuali ritorni a capo della chiave privata
         private_key = credentials_info.get("private_key")
 
         if private_key:
@@ -106,7 +105,7 @@ def get_google_credentials() -> Credentials:
     raise FileNotFoundError(
         "Credenziali Google non trovate.\n"
         f"In locale inserisci credentials.json in: {CREDENTIALS_FILE}\n"
-        "Su Koyeb configura la variabile "
+        "Su Railway configura la variabile "
         "GOOGLE_CREDENTIALS_JSON."
     )
 
@@ -127,7 +126,6 @@ def get_worksheet():
         )
 
     credentials = get_google_credentials()
-
     client = gspread.authorize(credentials)
 
     spreadsheet = client.open_by_key(
@@ -191,6 +189,8 @@ def get_user_orders(
     """
     Cerca nel foglio tutte le righe associate
     allo username Telegram ricevuto.
+
+    Esclude gli ordini con stato EVASO.
     """
     normalized_username = normalize_username(
         username
@@ -220,13 +220,21 @@ def get_user_orders(
         if sheet_username != normalized_username:
             continue
 
-        quantity = parse_quantity(
-            row.get("QUANTITA", 0)
-        )
-
         status = str(
             row.get("STATO", "")
         ).strip().upper()
+
+        # Non mostra gli ordini già evasi
+        if status == "EVASO":
+            print(
+                f"RIGA {row_number} ESCLUSA: "
+                "ordine già EVASO"
+            )
+            continue
+
+        quantity = parse_quantity(
+            row.get("QUANTITA", 0)
+        )
 
         order = {
             "date": str(
