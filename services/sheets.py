@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from pathlib import Path
 
 import gspread
@@ -10,7 +11,10 @@ from config import (
     SPREADSHEET_ID,
     WORKSHEET_NAME,
 )
-
+from services.cache import get_or_set
+from services.common import normalize_header, normalize_username, parse_quantity
+from services.perf import get_perf_context
+from services.retry import call_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -21,47 +25,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-
-
-def normalize_username(username: str | None) -> str:
-    """
-    Uniforma gli username Telegram.
-
-    Esempi:
-    Picco  -> @picco
-    @Picco -> @picco
-    """
-    if not username:
-        return ""
-
-    normalized = str(username).strip().lower()
-
-    if not normalized.startswith("@"):
-        normalized = f"@{normalized}"
-
-    return normalized
-
-
-def normalize_header(header: str) -> str:
-    """
-    Rimuove gli spazi e uniforma le intestazioni del foglio.
-    """
-    return str(header).strip().upper()
-
-
-def parse_quantity(value) -> int:
-    """
-    Converte la quantità letta dal foglio in numero intero.
-    """
-    if value is None or value == "":
-        return 0
-
-    try:
-        text = str(value).strip().replace(",", ".")
-        return int(float(text))
-
-    except (TypeError, ValueError):
-        return 0
 
 
 def get_google_credentials() -> Credentials:
@@ -135,67 +98,45 @@ def get_worksheet():
 
     credentials = get_google_credentials()
 
-    client = gspread.authorize(
-        credentials
+    client = gspread.authorize(credentials)
+    spreadsheet = call_with_retry(
+        lambda: client.open_by_key(SPREADSHEET_ID),
+        operation_name="apertura foglio ordini",
+    )
+    return call_with_retry(
+        lambda: spreadsheet.worksheet(WORKSHEET_NAME),
+        operation_name="apertura scheda ordini",
     )
 
-    spreadsheet = client.open_by_key(
-        SPREADSHEET_ID
-    )
 
-    return spreadsheet.worksheet(
-        WORKSHEET_NAME
-    )
+def get_sheet_records(force_refresh: bool = False) -> list[dict]:
+    """Legge e normalizza il foglio ORDINI usando cache e retry."""
+    def loader() -> list[dict]:
+        perf = get_perf_context()
+        worksheet = get_worksheet()
+        start = time.perf_counter()
+        values = call_with_retry(
+            worksheet.get_all_values,
+            operation_name="lettura foglio ordini",
+        )
+        if perf is not None:
+            perf.sheet_call((time.perf_counter() - start) * 1000.0)
+        if not values:
+            logger.info("Il foglio ordini è vuoto.")
+            return []
+        headers = [normalize_header(header) for header in values[0]]
+        records: list[dict] = []
+        for row_values in values[1:]:
+            row = {
+                header: (row_values[index] if index < len(row_values) else "")
+                for index, header in enumerate(headers)
+                if header
+            }
+            records.append(row)
+        logger.debug("Foglio ordini letto: %s righe", len(records))
+        return records
 
-
-def get_sheet_records() -> list[dict]:
-    """
-    Legge tutte le righe del foglio e normalizza
-    le intestazioni delle colonne.
-    """
-    worksheet = get_worksheet()
-
-    values = worksheet.get_all_values()
-
-    if not values:
-        logger.info("Il foglio ordini è vuoto.")
-        return []
-
-    raw_headers = values[0]
-
-    headers = [
-        normalize_header(header)
-        for header in raw_headers
-    ]
-
-    records = []
-
-    for row_values in values[1:]:
-        row = {}
-
-        for index, header in enumerate(
-            headers
-        ):
-            if not header:
-                continue
-
-            value = (
-                row_values[index]
-                if index < len(row_values)
-                else ""
-            )
-
-            row[header] = value
-
-        records.append(row)
-
-    logger.debug(
-        "Foglio ordini letto: %s righe, intestazioni=%s",
-        len(records),
-        headers,
-    )
-
-    return records
+    return get_or_set("orders:records", loader, force=force_refresh)
 
 
 def get_user_orders(
@@ -274,15 +215,6 @@ def get_user_orders(
 
         user_orders.append(order)
 
-        print(
-            f"RIGA {row_number} TROVATA:",
-            order,
-        )
 
-    print(
-        "ORDINI TROVATI:",
-        len(user_orders),
-    )
-    print("--------------------------------")
 
     return user_orders

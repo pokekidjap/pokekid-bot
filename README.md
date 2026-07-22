@@ -1,36 +1,42 @@
-# Pokekid Bot
+# Pokekid Bot 2.0.0
 
-Bot Telegram collegato a Google Sheets per ordini, profili, grading e spedizioni.
+Bot Telegram per consultazione ordini, stato SUB grading, profili, richieste di spedizione e gestione amministrativa tramite Google Sheets.
 
-## Installazione locale
+## Funzioni utente
 
-1. Crea l'ambiente virtuale:
-   ```powershell
-   py -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   ```
-2. Installa le dipendenze:
-   ```powershell
-   pip install -r requirements.txt
-   ```
-3. Copia `.env.example` in `.env` e inserisci i valori reali.
-4. Per Google puoi usare in locale `credentials.json` nella cartella principale. Il file è ignorato da Git.
-5. Avvia:
-   ```powershell
-   python main.py
-   ```
+- consultazione ordini e articoli disponibili;
+- selezione articoli e richiesta di spedizione;
+- storico spedizioni e tracking;
+- stato delle SUB grading;
+- profilo e dati di spedizione;
+- sincronizzazione automatica di Telegram ID e username;
+- notifiche per nuovi articoli entrati in magazzino.
 
-## Railway
+## Funzioni amministratore
 
-Imposta come variabili: `BOT_TOKEN`, `SPREADSHEET_ID`, `WORKSHEET_NAME`, `BOT_DB_SHEET_ID`, `GOOGLE_CREDENTIALS_JSON` e `WEBHOOK_SECRET`.
+- dashboard e statistiche;
+- ordini raggruppati per utente;
+- apertura e completamento smistamento con snapshot anti-duplicato;
+- gestione richieste, ricevute, tracking e storico spedizioni;
+- broadcast con anteprima e conferma;
+- messaggi configurabili dal foglio CONFIG;
+- centro notifiche e LOG operativo;
+- stato del bot e dei collegamenti.
 
-## Sicurezza
+## Prestazioni e robustezza
 
-Non caricare mai su Git o negli ZIP pubblici:
-- `.env`
-- `credentials.json`
-- token Telegram
-- chiavi private Google
-- cartelle `.git`, `.venv` e `__pycache__`
+- cache TTL differenziata per ORDINI, PROFILI, CONFIG, ADMIN, LOG, SPEDIZIONI e GRADING;
+- invalidazione mirata dopo le scritture;
+- retry con backoff per le letture Google più sensibili;
+- controlli di sola lettura all'avvio;
+- gestione centralizzata degli errori Telegram;
+- interfaccia e footer condivisi.
 
-Se una chiave è stata condivisa, eliminala dalla console del servizio e creane una nuova: rimuoverla soltanto dal file non la rende nuovamente sicura.
+## Avvio locale
+
+1. Crea l'ambiente virtuale e installa `requirements.txt`.
+2. Copia `.env.example` in `.env` e compila le variabili.
+3. Inserisci `credentials.json` nella cartella `BOT` oppure configura `GOOGLE_CREDENTIALS_JSON`.
+4. Avvia con `python main.py`.
+
+I test con il database reale devono essere eseguiti dopo aver configurato token, credenziali e fogli.

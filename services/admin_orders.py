@@ -1,6 +1,7 @@
 from collections import defaultdict
 
-from services.sheets import get_sheet_records, normalize_username, parse_quantity
+from services.common import normalize_username, parse_quantity
+from services.sheets import get_sheet_records
 
 
 MANAGED_STATUS_ORDER = {
@@ -17,7 +18,7 @@ def get_orders_grouped_by_user() -> list[dict]:
     Gli articoli con stato EVASO vengono esclusi sia dalla lista sia dai
     conteggi mostrati nel pannello amministratore.
     """
-    records = get_sheet_records()
+    records = get_sheet_records(force_refresh=True)
     grouped: dict[str, dict] = defaultdict(
         lambda: {
             "username": "",

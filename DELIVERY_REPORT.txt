@@ -1,0 +1,31 @@
+POKEKID BOT 2.0.0 - CONSEGNA FUNZIONALE
+Data: 22/07/2026
+
+INTERVENTI COMPLETATI
+- Interfaccia centralizzata: footer, divisori, errori compatti e pulsanti di ritorno condivisi.
+- Menu utente e amministratore compatti e coerenti.
+- Sincronizzazione profilo su tutti gli aggiornamenti Telegram.
+- Notifiche smistamento basate su snapshot reale degli articoli pronti.
+- Broadcast con anteprima, conferma e annullamento.
+- Centro notifiche, statistiche e messaggi CONFIG.
+- Cache TTL differenziata per tipologia di dati.
+- Cache GRADING e ORDINI integrate nel servizio condiviso.
+- Retry con backoff sulle operazioni Google soggette a errori temporanei.
+- Controlli diagnostici di sola lettura all'avvio.
+- Comandi Telegram pubblicati automaticamente.
+- Gestione errori centralizzata con risposta pulita all'utente.
+- Rimozione di print di debug, TODO e placeholder noti.
+- Progetto privo di .env, credentials.json, token, chiavi, .venv e cache Python.
+
+CONTROLLI ESEGUITI
+- Parsing AST di 30 file Python: OK.
+- Compilazione Python dell'intero progetto: OK.
+- Ricerca TODO/FIXME/placeholder e print di debug: OK.
+- Scansione file sensibili nello ZIP: OK.
+
+NON ESEGUITO IN QUESTA FASE
+- Connessione reale a Telegram.
+- Connessione reale ai Google Sheets dell'utente.
+- Deploy e collaudo reale su Railway.
+
+Questi ultimi controlli richiedono le credenziali dell'ambiente e saranno svolti durante il collaudo con l'utente.

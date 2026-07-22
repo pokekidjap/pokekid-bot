@@ -16,11 +16,42 @@ from services.bot_db import (
     get_admins,
     is_sorting_active,
 )
+from services.ui import with_footer
 
 
 logger = logging.getLogger(__name__)
 
 SHIPPING_PAYMENT_RECEIPT = 1
+
+
+def _shipping_response(text: str) -> str:
+    return with_footer(text)
+
+
+async def _edit_shipping_query(
+    query,
+    text: str,
+    reply_markup=None,
+    parse_mode: str = "HTML",
+) -> None:
+    await query.edit_message_text(
+        _shipping_response(text),
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+    )
+
+
+async def _reply_shipping_message(
+    message,
+    text: str,
+    reply_markup=None,
+    parse_mode: str = "HTML",
+) -> None:
+    await message.reply_text(
+        _shipping_response(text),
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+    )
 
 
 def shipping_receipt_cancel_keyboard() -> InlineKeyboardMarkup:
@@ -162,20 +193,20 @@ async def start_shipping_payment(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
     query = update.callback_query
-    await query.answer()
 
-    if is_sorting_active():
-        await query.edit_message_text(
-            text=(
+    with start_flow("shipping_payment"):
+        await query.answer()
+
+        if is_sorting_active():
+            await _edit_shipping_query(
+                query,
                 "📦 <b>Smistamento in corso</b>\n\n"
                 "Le richieste di spedizione sono temporaneamente sospese. "
-                "Riprova quando lo smistamento sarà completato."
-            ),
-            reply_markup=shipping_completed_keyboard(),
-            parse_mode="HTML",
-        )
-        clear_shipping_data(context)
-        return ConversationHandler.END
+                "Riprova quando lo smistamento sarà completato.",
+                reply_markup=shipping_completed_keyboard(),
+            )
+            clear_shipping_data(context)
+            return ConversationHandler.END
 
     selected_orders = context.user_data.get(
         "selected_orders",
@@ -193,14 +224,12 @@ async def start_shipping_payment(
         or not selected_carrier
         or not shipping_profile
     ):
-        await query.edit_message_text(
-            text=(
-                "⚠️ <b>Richiesta non valida</b>\n\n"
-                "I dati della spedizione non sono più "
-                "disponibili. Ripeti la procedura."
-            ),
+        await _edit_shipping_query(
+            query,
+            "⚠️ <b>Richiesta non valida</b>\n\n"
+            "I dati della spedizione non sono più "
+            "disponibili. Ripeti la procedura.",
             reply_markup=shipping_completed_keyboard(),
-            parse_mode="HTML",
         )
         clear_shipping_data(context)
         return ConversationHandler.END
@@ -209,15 +238,13 @@ async def start_shipping_payment(
         "waiting_shipping_receipt"
     ] = True
 
-    await query.edit_message_text(
-        text=(
-            "📎 <b>Invia la ricevuta del pagamento</b>\n\n"
-            "Invia una foto oppure un documento/PDF.\n\n"
-            f"🚚 Corriere: <b>{escape(selected_carrier['name'])}</b>\n"
-            f"💶 Importo: <b>€ {selected_carrier['price']:.2f}</b>"
-        ),
+    await _edit_shipping_query(
+        query,
+        "📎 <b>Invia la ricevuta del pagamento</b>\n\n"
+        "Invia una foto oppure un documento/PDF.\n\n"
+        f"🚚 Corriere: <b>{escape(selected_carrier['name'])}</b>\n"
+        f"💶 Importo: <b>€ {selected_carrier['price']:.2f}</b>",
         reply_markup=shipping_receipt_cancel_keyboard(),
-        parse_mode="HTML",
     )
 
     return SHIPPING_PAYMENT_RECEIPT
@@ -230,11 +257,12 @@ async def receive_shipping_receipt(
     message = update.effective_message
     user = update.effective_user
 
-    if not message or not user:
-        return SHIPPING_PAYMENT_RECEIPT
+    with start_flow("shipping_receipt"):
+        if not message or not user:
+            return SHIPPING_PAYMENT_RECEIPT
 
-    payment_file_id = ""
-    payment_type = ""
+        payment_file_id = ""
+        payment_type = ""
 
     if message.photo:
         payment_file_id = message.photo[-1].file_id
@@ -244,7 +272,8 @@ async def receive_shipping_receipt(
         payment_type = "DOCUMENTO"
 
     if not payment_file_id:
-        await message.reply_text(
+        await _reply_shipping_message(
+            message,
             "⚠️ Invia una foto oppure un documento/PDF.",
             reply_markup=shipping_receipt_cancel_keyboard(),
         )
@@ -266,7 +295,8 @@ async def receive_shipping_receipt(
         or not selected_carrier
         or not shipping_profile
     ):
-        await message.reply_text(
+        await _reply_shipping_message(
+            message,
             "⚠️ Sessione scaduta. Ripeti la procedura.",
             reply_markup=shipping_completed_keyboard(),
         )
@@ -296,8 +326,10 @@ async def receive_shipping_receipt(
         logger.exception(
             "Errore creazione richiesta spedizione"
         )
-        await message.reply_text(
-            "⚠️ Errore durante il salvataggio. Riprova."
+        await _reply_shipping_message(
+            message,
+            "⚠️ Errore durante il salvataggio. Riprova.",
+            reply_markup=shipping_receipt_cancel_keyboard(),
         )
         return SHIPPING_PAYMENT_RECEIPT
 
@@ -320,19 +352,17 @@ async def receive_shipping_receipt(
 
     clear_shipping_data(context)
 
-    await message.reply_text(
-        text=(
-            "✅ <b>Richiesta di spedizione inviata!</b>\n\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-            f"🆔 Richiesta: <code>{escape(shipping_id)}</code>\n"
-            f"🚚 Corriere: <b>{escape(carrier)}</b>\n"
-            f"💶 Costo: <b>€ {shipping_cost:.2f}</b>\n"
-            "📋 Stato: <b>IN ATTESA</b>\n\n"
-            "Riceverai il tracking quando la spedizione "
-            "verrà preparata."
-        ),
+    await _reply_shipping_message(
+        message,
+        "✅ <b>Richiesta di spedizione inviata!</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"🆔 Richiesta: <code>{escape(shipping_id)}</code>\n"
+        f"🚚 Corriere: <b>{escape(carrier)}</b>\n"
+        f"💶 Costo: <b>€ {shipping_cost:.2f}</b>\n"
+        "📋 Stato: <b>IN_ATTESA</b>\n\n"
+        "Riceverai il tracking quando la spedizione "
+        "verrà preparata.",
         reply_markup=shipping_completed_keyboard(),
-        parse_mode="HTML",
     )
 
     return ConversationHandler.END
@@ -342,10 +372,13 @@ async def invalid_shipping_receipt(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
-    await update.effective_message.reply_text(
-        "⚠️ Sto aspettando una foto o un documento/PDF.",
-        reply_markup=shipping_receipt_cancel_keyboard(),
-    )
+    message = update.effective_message
+    if message:
+        await _reply_shipping_message(
+            message,
+            "⚠️ Sto aspettando una foto o un documento/PDF.",
+            reply_markup=shipping_receipt_cancel_keyboard(),
+        )
     return SHIPPING_PAYMENT_RECEIPT
 
 
@@ -357,8 +390,9 @@ async def cancel_shipping_receipt(
     await query.answer()
     clear_shipping_data(context)
 
-    await query.edit_message_text(
-        text="❌ Richiesta di spedizione annullata.",
+    await _edit_shipping_query(
+        query,
+        "❌ Richiesta di spedizione annullata.",
         reply_markup=shipping_completed_keyboard(),
     )
 

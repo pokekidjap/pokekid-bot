@@ -1,10 +1,21 @@
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import gspread
 
 from config import BOT_DB_SHEET_ID
+from services.cache import get_or_set, invalidate
+from services.common import (
+    clean_value,
+    is_truthy,
+    normalize_header,
+    normalize_telegram_id,
+    normalize_username,
+)
+from services.perf import get_perf_context
 from services.sheets import get_google_credentials
+from services.ui import BOT_VERSION
 
 
 PROFILE_WORKSHEET_NAME = "PROFILI"
@@ -14,6 +25,51 @@ CONFIG_WORKSHEET_NAME = "CONFIG"
 LOG_WORKSHEET_NAME = "LOG"
 
 ITALY_TIMEZONE = ZoneInfo("Europe/Rome")
+
+
+def _cached_values(cache_key: str, worksheet_factory, force: bool = False) -> list[list[str]]:
+    def loader() -> list[list[str]]:
+        perf = get_perf_context()
+        start = time.perf_counter()
+        values = worksheet_factory().get_all_values()
+        if perf is not None:
+            perf.sheet_call((time.perf_counter() - start) * 1000.0)
+        return values
+
+    return get_or_set(cache_key, loader, force=force)
+
+
+def get_profile_values(force_refresh: bool = False) -> list[list[str]]:
+    return _cached_values("profiles", get_profiles_worksheet, force=force_refresh)
+
+
+def get_shipping_values(force_refresh: bool = False) -> list[list[str]]:
+    return _cached_values("shipping", get_shipping_worksheet, force=force_refresh)
+
+
+def _parse_shipping_headers(values: list[list[str]]) -> list[str]:
+    return [clean_value(header).upper() for header in values[0]]
+
+
+def _build_shipping_row(
+    headers: list[str],
+    row_values: list[str],
+    row_number: int,
+) -> dict | None:
+    row = {}
+
+    for index, header in enumerate(headers):
+        if not header:
+            continue
+
+        value = row_values[index] if index < len(row_values) else ""
+        row[header] = clean_value(value)
+
+    if not row.get("ID"):
+        return None
+
+    row["_ROW_NUMBER"] = row_number
+    return row
 
 
 def get_current_datetime() -> str:
@@ -28,49 +84,6 @@ def get_current_datetime() -> str:
     )
 
 
-def clean_value(value) -> str:
-    """
-    Converte un valore in testo e rimuove
-    eventuali spazi iniziali e finali.
-    """
-    if value is None:
-        return ""
-
-    return str(value).strip()
-
-
-def normalize_telegram_id(
-    telegram_id: int | str,
-) -> str:
-    """
-    Uniforma il Telegram ID come stringa.
-    """
-    return clean_value(
-        telegram_id
-    )
-
-
-def normalize_username(
-    username: str | None,
-) -> str:
-    """
-    Uniforma lo username Telegram.
-
-    Esempi:
-    Picco  -> @picco
-    @Picco -> @picco
-    """
-    username = clean_value(
-        username
-    ).lower()
-
-    if not username:
-        return ""
-
-    if not username.startswith("@"):
-        username = f"@{username}"
-
-    return username
 
 
 def get_bot_db_spreadsheet() -> gspread.Spreadsheet:
@@ -223,7 +236,7 @@ def get_admins(
     gli amministratori con ATTIVO impostato su TRUE.
     """
     worksheet = get_admin_worksheet()
-    values = worksheet.get_all_values()
+    values = _cached_values("admins", get_admin_worksheet)
 
     if len(values) < 2:
         return []
@@ -367,7 +380,7 @@ def get_profile(
         return None
 
     worksheet = get_profiles_worksheet()
-    values = worksheet.get_all_values()
+    values = get_profile_values()
 
     if len(values) < 2:
         return None
@@ -595,6 +608,8 @@ def delete_profile(
         row_number
     )
 
+    invalidate("profiles")
+
     log_username = (
         normalize_username(username)
         or existing_profile.get(
@@ -654,6 +669,7 @@ def write_log(
         row_data,
         value_input_option="USER_ENTERED",
     )
+    invalidate("logs")
 def get_config_values() -> dict:
     """
     Legge il foglio CONFIG e restituisce
@@ -665,7 +681,7 @@ def get_config_values() -> dict:
     CHIAVE | VALORE | ATTIVO
     """
     worksheet = get_config_worksheet()
-    values = worksheet.get_all_values()
+    values = _cached_values("config", get_config_worksheet)
 
     if len(values) < 2:
         return {}
@@ -742,18 +758,8 @@ def get_active_shipping_methods() -> list[dict]:
         if not key.startswith("CORRIERE_"):
             continue
 
-        active = clean_value(
-            item.get("active", "")
-        ).upper()
-
-        if active not in {
-            "TRUE",
-            "VERO",
-            "SI",
-            "SÌ",
-            "1",
-            "YES",
-        }:
+        active = is_truthy(item.get("active", ""))
+        if not active:
             continue
 
         carrier_name = key.replace(
@@ -806,7 +812,11 @@ def generate_shipping_id() -> str:
     SP-20260722-001
     """
     worksheet = get_shipping_worksheet()
-    values = worksheet.get_all_values()
+    perf = get_perf_context()
+    start = time.perf_counter()
+    values = worksheet.col_values(1)
+    if perf is not None:
+        perf.sheet_call((time.perf_counter() - start) * 1000.0)
 
     date_prefix = datetime.now(
         ITALY_TIMEZONE
@@ -816,38 +826,29 @@ def generate_shipping_id() -> str:
 
     progressive = 1
 
-    if len(values) >= 2:
-        for row_values in values[1:]:
-            if not row_values:
-                continue
+    for existing_id in values[1:]:
+        existing_id = clean_value(existing_id)
 
-            existing_id = clean_value(
-                row_values[0]
+        if not existing_id.startswith(date_prefix):
+            continue
+
+        try:
+            existing_progressive = int(
+                existing_id.rsplit(
+                    "-",
+                    1,
+                )[1]
+            )
+            progressive = max(
+                progressive,
+                existing_progressive + 1,
             )
 
-            if not existing_id.startswith(
-                date_prefix
-            ):
-                continue
-
-            try:
-                existing_progressive = int(
-                    existing_id.rsplit(
-                        "-",
-                        1,
-                    )[1]
-                )
-
-                progressive = max(
-                    progressive,
-                    existing_progressive + 1,
-                )
-
-            except (
-                IndexError,
-                ValueError,
-            ):
-                continue
+        except (
+            IndexError,
+            ValueError,
+        ):
+            continue
 
     return (
         f"{date_prefix}-"
@@ -980,12 +981,16 @@ def create_shipping_request(
     ]
 
     worksheet = get_shipping_worksheet()
-
+    perf = get_perf_context()
+    start = time.perf_counter()
     worksheet.append_row(
         row_data,
         value_input_option="USER_ENTERED",
     )
+    if perf is not None:
+        perf.sheet_call((time.perf_counter() - start) * 1000.0)
 
+    invalidate("shipping")
     write_log(
         telegram_id=telegram_id,
         username=username,
@@ -1049,41 +1054,30 @@ def get_user_shipping_requests(
     if not telegram_id:
         return []
 
-    worksheet = get_shipping_worksheet()
-    values = worksheet.get_all_values()
+    values = get_shipping_values()
 
     if len(values) < 2:
         return []
 
-    headers = [
-        clean_value(header).upper()
-        for header in values[0]
-    ]
-
+    headers = _parse_shipping_headers(values)
     shipping_requests = []
 
     for row_number, row_values in enumerate(
         values[1:],
         start=2,
     ):
-        row = {}
+        row = _build_shipping_row(
+            headers,
+            row_values,
+            row_number,
+        )
 
-        for index, header in enumerate(headers):
-            if not header:
-                continue
-
-            value = (
-                row_values[index]
-                if index < len(row_values)
-                else ""
-            )
-
-            row[header] = clean_value(value)
+        if not row:
+            continue
 
         if row.get("TELEGRAM_ID") != telegram_id:
             continue
 
-        row["_ROW_NUMBER"] = row_number
         shipping_requests.append(row)
 
     shipping_requests.reverse()
@@ -1099,16 +1093,12 @@ def get_all_shipping_requests(
     Se statuses è valorizzato, restituisce solamente
     le richieste con uno degli stati indicati.
     """
-    worksheet = get_shipping_worksheet()
-    values = worksheet.get_all_values()
+    values = get_shipping_values()
 
     if len(values) < 2:
         return []
 
-    headers = [
-        clean_value(header).upper()
-        for header in values[0]
-    ]
+    headers = _parse_shipping_headers(values)
 
     normalized_statuses = None
 
@@ -1125,21 +1115,13 @@ def get_all_shipping_requests(
         values[1:],
         start=2,
     ):
-        row = {}
+        row = _build_shipping_row(
+            headers,
+            row_values,
+            row_number,
+        )
 
-        for index, header in enumerate(headers):
-            if not header:
-                continue
-
-            value = (
-                row_values[index]
-                if index < len(row_values)
-                else ""
-            )
-
-            row[header] = clean_value(value)
-
-        if not row.get("ID"):
+        if not row:
             continue
 
         status = clean_value(
@@ -1152,7 +1134,6 @@ def get_all_shipping_requests(
         ):
             continue
 
-        row["_ROW_NUMBER"] = row_number
         shipping_requests.append(row)
 
     shipping_requests.reverse()
@@ -1173,14 +1154,30 @@ def get_shipping_request(
     if not shipping_id:
         return None
 
-    for shipping_request in get_all_shipping_requests():
-        if (
-            clean_value(
-                shipping_request.get("ID", "")
-            ).upper()
-            == shipping_id
-        ):
-            return shipping_request
+    values = get_shipping_values()
+
+    if len(values) < 2:
+        return None
+
+    headers = _parse_shipping_headers(values)
+
+    for row_number, row_values in enumerate(
+        values[1:],
+        start=2,
+    ):
+        row = _build_shipping_row(
+            headers,
+            row_values,
+            row_number,
+        )
+
+        if not row:
+            continue
+
+        if clean_value(
+            row.get("ID", "")
+        ).upper() == shipping_id:
+            return row
 
     return None
 
@@ -1254,6 +1251,7 @@ def complete_shipping_request(
         value_input_option="USER_ENTERED",
     )
 
+    invalidate("shipping")
     write_log(
         telegram_id=existing_request.get(
             "TELEGRAM_ID",
@@ -1298,17 +1296,17 @@ def set_config_value(key: str, value: str, active: str | bool | None = None) -> 
             current_active = row[2] if len(row) > 2 else ""
             final_active = current_active if active is None else ("TRUE" if active is True else "FALSE" if active is False else clean_value(active))
             worksheet.update(range_name=f"A{row_number}:C{row_number}", values=[[key, clean_value(value), final_active]])
+            invalidate("config")
             return
 
     final_active = "" if active is None else ("TRUE" if active is True else "FALSE" if active is False else clean_value(active))
     worksheet.append_row([key, clean_value(value), final_active], value_input_option="USER_ENTERED")
+    invalidate("config")
 
 
 def is_sorting_active() -> bool:
     item = get_config_values().get("SMISTAMENTO", {})
-    value = clean_value(item.get("value", "")).upper()
-    active = clean_value(item.get("active", "")).upper()
-    return value in {"TRUE", "VERO", "SI", "SÌ", "1", "YES"} or active in {"TRUE", "VERO", "SI", "SÌ", "1", "YES"}
+    return is_truthy(item.get("value", "")) or is_truthy(item.get("active", ""))
 
 
 def set_sorting_status(active: bool, admin: str = "") -> None:
@@ -1317,14 +1315,45 @@ def set_sorting_status(active: bool, admin: str = "") -> None:
 
 
 def get_bot_status() -> dict:
-    profiles = get_profiles_worksheet().get_all_values()
-    shipments = get_all_shipping_requests()
-    config = get_config_values()
+    profile_values = get_profile_values()
+    shipping_values = get_shipping_values()
+    shipments = []
+    if len(shipping_values) >= 2:
+        headers = [clean_value(header).upper() for header in shipping_values[0]]
+        for row_values in shipping_values[1:]:
+            row = {
+                header: clean_value(row_values[index] if index < len(row_values) else "")
+                for index, header in enumerate(headers)
+                if header
+            }
+            if row.get("ID"):
+                shipments.append(row)
     return {
-        "profiles": max(len(profiles) - 1, 0),
+        "profiles": max(len(profile_values) - 1, 0),
         "admins": len(get_admins()),
         "shipping_pending": sum(1 for x in shipments if x.get("STATO") == "IN_ATTESA"),
         "shipping_sent": sum(1 for x in shipments if x.get("STATO") == "SPEDITO"),
         "sorting": is_sorting_active(),
-        "version": clean_value(config.get("VERSIONE_BOT", {}).get("value", "1.3")) or "1.3",
+        "version": BOT_VERSION,
     }
+
+
+def get_recent_logs(limit: int = 15) -> list[dict]:
+    """Restituisce gli ultimi eventi del foglio LOG, dal più recente."""
+    worksheet = get_log_worksheet()
+    values = _cached_values("logs", get_log_worksheet)
+    if len(values) < 2:
+        return []
+    headers = [clean_value(value).upper() for value in values[0]]
+    result = []
+    for row_values in reversed(values[1:]):
+        row = {
+            header: clean_value(row_values[index] if index < len(row_values) else "")
+            for index, header in enumerate(headers)
+            if header
+        }
+        if any(row.values()):
+            result.append(row)
+        if len(result) >= max(1, min(limit, 50)):
+            break
+    return result

@@ -3,12 +3,26 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 def admin_home_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👥 Ordini per utente", callback_data="admin_orders_users")],
-        [InlineKeyboardButton("📦 Avvia smistamento", callback_data="admin_sorting_start")],
-        [InlineKeyboardButton("✅ Completa smistamento", callback_data="admin_sorting_complete")],
-        [InlineKeyboardButton("🚚 Richieste spedizione", callback_data="admin_shipping_list")],
-        [InlineKeyboardButton("🗂 Storico spedizioni", callback_data="admin_shipping_history")],
-        [InlineKeyboardButton("📊 Stato bot", callback_data="admin_bot_status")],
+        [
+            InlineKeyboardButton("👥 Ordini", callback_data="admin_orders_users"),
+            InlineKeyboardButton("🚚 Spedizioni", callback_data="admin_shipping_list"),
+        ],
+        [
+            InlineKeyboardButton("📦 Avvia", callback_data="admin_sorting_start"),
+            InlineKeyboardButton("✅ Completa", callback_data="admin_sorting_complete"),
+        ],
+        [
+            InlineKeyboardButton("📊 Statistiche", callback_data="admin_stats"),
+            InlineKeyboardButton("ℹ️ Info bot", callback_data="admin_bot_status"),
+        ],
+        [
+            InlineKeyboardButton("📣 Broadcast", callback_data="admin_broadcast_start"),
+            InlineKeyboardButton("🔔 Notifiche", callback_data="admin_notifications"),
+        ],
+        [
+            InlineKeyboardButton("💬 Messaggi", callback_data="admin_messages"),
+            InlineKeyboardButton("🗂 Storico", callback_data="admin_shipping_history"),
+        ],
         [InlineKeyboardButton("🏠 Menu principale", callback_data="menu_home")],
     ])
 
@@ -19,7 +33,6 @@ def admin_users_keyboard(users: list[dict]) -> InlineKeyboardMarkup:
         username = str(user.get("username", ""))
         if len(username) > 24:
             username = username[:21] + "..."
-
         rows.append([InlineKeyboardButton(
             f"👤 {username} · 🟢 {user['ready_quantity']}/{user['total_quantity']}",
             callback_data=f"admin_user_orders:{index}",
@@ -53,4 +66,33 @@ def admin_shipping_detail_keyboard(shipping_id: str) -> InlineKeyboardMarkup:
 
 
 def admin_tracking_cancel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annulla inserimento", callback_data="admin_tracking_cancel")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annulla", callback_data="admin_tracking_cancel")]])
+
+
+def admin_cancel_keyboard(callback_data: str = "admin_home") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Annulla", callback_data=callback_data)]])
+
+
+def admin_back_keyboard(callback_data: str = "admin_home") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Indietro", callback_data=callback_data)]])
+
+
+def admin_orders_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Utenti", callback_data="admin_orders_users")]])
+
+
+def admin_broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Conferma invio", callback_data="admin_broadcast_confirm")],
+        [InlineKeyboardButton("❌ Annulla", callback_data="admin_broadcast_cancel")],
+    ])
+
+
+def admin_messages_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 Notifica magazzino", callback_data="admin_message_edit:MSG_MAGAZZINO")],
+        [InlineKeyboardButton("👋 Messaggio benvenuto", callback_data="admin_message_edit:MSG_BENVENUTO")],
+        [InlineKeyboardButton("🚚 Notifica spedizione", callback_data="admin_message_edit:MSG_SPEDIZIONE")],
+        [InlineKeyboardButton("📢 Firma broadcast", callback_data="admin_message_edit:MSG_BROADCAST_FOOTER")],
+        [InlineKeyboardButton("⬅️ Pannello Admin", callback_data="admin_home")],
+    ])

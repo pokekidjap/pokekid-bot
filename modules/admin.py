@@ -1,29 +1,86 @@
 import logging
 from html import escape
 
+from services.perf import start_flow
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 
 from keyboards.admin import (
+    admin_broadcast_confirm_keyboard,
+    admin_back_keyboard,
     admin_home_keyboard,
+    admin_orders_back_keyboard,
     admin_shipping_detail_keyboard,
     admin_shipping_list_keyboard,
     admin_tracking_cancel_keyboard,
     admin_users_keyboard,
+    admin_cancel_keyboard,
+    admin_messages_keyboard,
 )
 from services.admin_orders import get_orders_grouped_by_user
 from services.bot_db import (
     complete_shipping_request,
     get_admin,
+    get_admins,
     get_all_shipping_requests,
     get_bot_status,
+    get_config_values,
+    get_recent_logs,
+    set_config_value,
+    write_log,
     get_shipping_request,
     is_admin,
+    is_sorting_active,
     set_sorting_status,
 )
+from services.notifications import notify_warehouse_users, send_broadcast
+from services.stats import get_admin_statistics
+from services.sorting import clear_sorting_snapshot, get_users_with_new_ready_items, save_sorting_snapshot
+from services.ui import BOT_VERSION, LAST_UPDATE, compact_error, with_footer, page_title
 
 logger = logging.getLogger(__name__)
 ADMIN_TRACKING = 20
+ADMIN_BROADCAST = 21
+ADMIN_MESSAGE_EDIT = 22
+ADMIN_BROADCAST_CONFIRM = 23
+
+
+def _admin_response(text: str) -> str:
+    return with_footer(text)
+
+
+async def _edit_admin_query(
+    query,
+    text: str,
+    reply_markup=None,
+    parse_mode: str = "HTML",
+) -> None:
+    await query.edit_message_text(
+        _admin_response(text),
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+    )
+
+
+async def _reply_admin_message(
+    message,
+    text: str,
+    reply_markup=None,
+    parse_mode: str = "HTML",
+) -> None:
+    await message.reply_text(
+        _admin_response(text),
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+    )
+
+
+async def _admin_error_edit(query, message: str, reply_markup=None) -> None:
+    await _edit_admin_query(query, compact_error(message), reply_markup=reply_markup)
+
+
+async def _admin_error_reply(message_obj, message: str) -> None:
+    await _reply_admin_message(message_obj, compact_error(message))
 
 
 async def deny_admin_access(update: Update) -> None:
@@ -41,13 +98,25 @@ async def check_admin(update: Update) -> bool:
     return True
 
 
+def _admin_home_text() -> str:
+    return with_footer(
+        page_title(
+            "👑",
+            "ADMIN PANEL",
+            "Gestisci ordini, spedizioni e comunicazioni in un unico pannello.",
+        )
+    )
+
+
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await check_admin(update):
         return
-    await update.effective_message.reply_text(
-        "🛠️ <b>Pannello Admin · Versione 1.3</b>\n\nSeleziona una funzione:",
-        reply_markup=admin_home_keyboard(), parse_mode="HTML",
-    )
+    with start_flow("admin_dashboard"):
+        await _reply_admin_message(
+            update.effective_message,
+            _admin_home_text(),
+            reply_markup=admin_home_keyboard(),
+        )
 
 
 async def show_admin_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -55,27 +124,34 @@ async def show_admin_home(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(
-        "🛠️ <b>Pannello Admin · Versione 1.3</b>\n\nSeleziona una funzione:",
-        reply_markup=admin_home_keyboard(), parse_mode="HTML",
-    )
+    with start_flow("admin_dashboard"):
+        await _edit_admin_query(
+            query,
+            _admin_home_text(),
+            reply_markup=admin_home_keyboard(),
+        )
 
 
 async def show_orders_by_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await check_admin(update):
         return
     query = update.callback_query
-    await query.answer()
-    try:
-        users = get_orders_grouped_by_user()
-    except Exception:
-        logger.exception("Errore lettura ordini per utente")
-        await query.edit_message_text("⚠️ Impossibile leggere gli ordini.", reply_markup=admin_home_keyboard())
-        return
-    context.user_data["admin_order_users"] = users
-    await query.edit_message_text(
-        f"👥 <b>Ordini per utente</b>\n\nUtenti trovati: <b>{len(users)}</b>\n🟢 = prodotti in magazzino / da gestire",
-        reply_markup=admin_users_keyboard(users), parse_mode="HTML",
+
+    with start_flow("admin_orders_by_user"):
+        await query.answer()
+        try:
+            users = get_orders_grouped_by_user()
+        except Exception:
+            logger.exception("Errore lettura ordini per utente")
+            await _admin_error_edit(query, "Impossibile leggere gli ordini.", reply_markup=admin_home_keyboard())
+            return
+        context.user_data["admin_order_users"] = users
+    await _edit_admin_query(
+        query,
+        "👥 <b>Ordini per utente</b>\n\n"
+        f"Utenti trovati: <b>{len(users)}</b>\n"
+        "🟢 = prodotti in magazzino / da gestire",
+        reply_markup=admin_users_keyboard(users),
     )
 
 
@@ -163,14 +239,10 @@ async def show_user_orders_detail(update: Update, context: ContextTypes.DEFAULT_
     if hidden_items:
         text += f"\n\n… e altri <b>{hidden_items}</b> articoli non mostrati."
 
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
-    await query.edit_message_text(
+    await _edit_admin_query(
+        query,
         text,
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ Utenti", callback_data="admin_orders_users")]]
-        ),
-        parse_mode="HTML",
+        reply_markup=admin_orders_back_keyboard(),
     )
 
 
@@ -178,12 +250,25 @@ async def start_sorting(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not await check_admin(update):
         return
     query = update.callback_query
+    if is_sorting_active():
+        await query.answer("Uno smistamento è già attivo.", show_alert=True)
+        return
     await query.answer()
     admin = get_admin(query.from_user.id) or {}
-    set_sorting_status(True, admin.get("USERNAME", str(query.from_user.id)))
-    await query.edit_message_text(
-        "📦 <b>Smistamento avviato</b>\n\nLe nuove richieste di spedizione sono temporaneamente bloccate fino al completamento.",
-        reply_markup=admin_home_keyboard(), parse_mode="HTML",
+    admin_name = admin.get("USERNAME", str(query.from_user.id))
+    try:
+        ready_before = save_sorting_snapshot()
+        set_sorting_status(True, admin_name)
+    except Exception:
+        logger.exception("Errore avvio smistamento")
+        await _admin_error_edit(query, "Impossibile avviare lo smistamento.", reply_markup=admin_home_keyboard())
+        return
+    await _edit_admin_query(
+        query,
+        "📦 <b>Smistamento avviato</b>\n\n"
+        f"Snapshot salvato: <b>{ready_before}</b> articoli già in magazzino.\n"
+        "Le nuove richieste di spedizione sono temporaneamente bloccate.",
+        reply_markup=admin_home_keyboard(),
     )
 
 
@@ -191,12 +276,55 @@ async def complete_sorting(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not await check_admin(update):
         return
     query = update.callback_query
+    if not is_sorting_active():
+        await query.answer("Non risulta alcuno smistamento attivo.", show_alert=True)
+        return
     await query.answer()
     admin = get_admin(query.from_user.id) or {}
-    set_sorting_status(False, admin.get("USERNAME", str(query.from_user.id)))
-    await query.edit_message_text(
-        "✅ <b>Smistamento completato</b>\n\nGli utenti possono nuovamente richiedere le spedizioni.",
-        reply_markup=admin_home_keyboard(), parse_mode="HTML",
+    admin_name = admin.get("USERNAME", str(query.from_user.id))
+
+    try:
+        changed_users = get_users_with_new_ready_items()
+    except Exception:
+        logger.exception("Errore confronto smistamento")
+        await _admin_error_edit(
+            query,
+            "Impossibile confrontare gli ordini. Lo smistamento non è stato chiuso.",
+            reply_markup=admin_home_keyboard(),
+        )
+        return
+
+    notification_result = await notify_warehouse_users(context.bot, changed_users)
+    sent = notification_result["sent"]
+    failed = notification_result["failed"]
+    missing_profiles = notification_result["missing"]
+
+    set_sorting_status(False, admin_name)
+    clear_sorting_snapshot()
+    write_log(
+        action="NOTIFICHE_SMISTAMENTO",
+        details=f"Inviate={sent}; senza profilo={len(missing_profiles)}; errori={failed}",
+        admin=admin_name,
+    )
+
+    missing_text = ""
+    if missing_profiles:
+        preview = ", ".join(missing_profiles[:10])
+        if len(missing_profiles) > 10:
+            preview += f" e altri {len(missing_profiles) - 10}"
+        missing_text = (
+            f"\n⚠️ Senza profilo: <b>{len(missing_profiles)}</b>\n"
+            f"{escape(preview)}"
+        )
+
+    await _edit_admin_query(
+        query,
+        "✅ <b>Smistamento completato</b>\n\n"
+        f"🔔 Notifiche inviate: <b>{sent}</b>\n"
+        f"❌ Errori di invio: <b>{failed}</b>"
+        f"{missing_text}\n\n"
+        "Gli utenti possono nuovamente richiedere le spedizioni.",
+        reply_markup=admin_home_keyboard(),
     )
 
 
@@ -207,25 +335,284 @@ async def show_bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     try:
         status = get_bot_status()
-        users = get_orders_grouped_by_user()
-        total_orders = sum(u["total_quantity"] for u in users)
-        ready = sum(u["ready_quantity"] for u in users)
+        database_line = "🟢 Database"
+        sheets_line = "🟢 Google Sheets"
     except Exception:
         logger.exception("Errore stato bot")
-        await query.edit_message_text("⚠️ Impossibile calcolare lo stato del bot.", reply_markup=admin_home_keyboard())
-        return
-    await query.edit_message_text(
-        "📊 <b>Stato bot</b>\n\n"
-        f"🤖 Versione: <b>{escape(status['version'])}</b>\n"
-        f"👤 Profili: <b>{status['profiles']}</b>\n"
-        f"🛠 Admin attivi: <b>{status['admins']}</b>\n"
-        f"📦 Articoli totali: <b>{total_orders}</b>\n"
-        f"🟢 Articoli pronti: <b>{ready}</b>\n"
-        f"🟡 Spedizioni in attesa: <b>{status['shipping_pending']}</b>\n"
-        f"✅ Spedizioni inviate: <b>{status['shipping_sent']}</b>\n"
-        f"🔄 Smistamento: <b>{'ATTIVO' if status['sorting'] else 'NON ATTIVO'}</b>",
-        reply_markup=admin_home_keyboard(), parse_mode="HTML",
+        status = {
+            "version": BOT_VERSION,
+            "profiles": 0,
+            "admins": len(get_admins()),
+            "sorting": False,
+        }
+        database_line = "🔴 Database"
+        sheets_line = "🔴 Google Sheets"
+
+    sorting_line = "🟢 Smistamento ON" if status.get("sorting") else "🔴 Smistamento OFF"
+    text = with_footer(
+        "🤖 <b>Pokekid Bot</b>\n\n"
+        f"Versione: {escape(status.get('version') or BOT_VERSION)}\n\n"
+        f"{database_line}\n"
+        f"{sheets_line}\n"
+        "🟢 Bot Online\n"
+        f"{sorting_line}\n\n"
+        f"👥 Utenti registrati: {status.get('profiles', 0)}\n"
+        f"👑 Admin: {status.get('admins', 0)}\n\n"
+        f"Ultimo aggiornamento:\n{LAST_UPDATE}"
     )
+    await _edit_admin_query(
+        query,
+        text,
+        reply_markup=admin_home_keyboard(),
+    )
+
+
+async def show_admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await check_admin(update):
+        return
+    query = update.callback_query
+    await query.answer()
+    try:
+        stats = get_admin_statistics()
+    except Exception:
+        logger.exception("Errore statistiche admin")
+        await _admin_error_edit(query, "Impossibile calcolare le statistiche. Riprova più tardi.", reply_markup=admin_home_keyboard())
+        return
+
+    await _edit_admin_query(
+        query,
+        "📊 <b>Statistiche</b>\n\n"
+        f"👥 Utenti registrati: <b>{stats['profiles']}</b>\n"
+        f"📦 Articoli attivi: <b>{stats['active_items']}</b>\n"
+        f"🟢 In magazzino: <b>{stats['ready_items']}</b>\n"
+        f"🔵 Grading: <b>{stats['grading_items']}</b>\n"
+        f"🟣 Restauro: <b>{stats['restoration_items']}</b>\n"
+        f"🟡 Ordinati: <b>{stats['ordered_items']}</b>\n"
+        f"🚚 Spedizioni in attesa: <b>{stats['shipping_pending']}</b>\n"
+        f"✅ Spedizioni inviate: <b>{stats['shipping_sent']}</b>\n"
+        f"👤 Utenti con ordini: <b>{stats['users_with_orders']}</b>",
+        reply_markup=admin_home_keyboard(),
+    )
+
+
+async def show_admin_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await check_admin(update):
+        return
+    query = update.callback_query
+    await query.answer()
+    try:
+        logs = get_recent_logs(50)
+    except Exception:
+        logger.exception("Errore lettura centro notifiche")
+        await _admin_error_edit(query, "Impossibile leggere le notifiche.", reply_markup=admin_home_keyboard())
+        return
+
+    interesting = {
+        "USERNAME_AGGIORNATO": "🔄",
+        "NOTIFICHE_SMISTAMENTO": "📦",
+        "BROADCAST": "📣",
+        "SPEDIZIONE_COMPLETATA": "🚚",
+        "UTENTE_REGISTRATO": "👤",
+    }
+    rows = []
+    for item in logs:
+        action = item.get("AZIONE", "")
+        if action not in interesting:
+            continue
+        date = item.get("DATA", "")
+        username = item.get("USERNAME", "")
+        details = item.get("DETTAGLI", "")
+        label = action.replace("_", " ").title()
+        extra = f" · {username}" if username else ""
+        rows.append(
+            f"{interesting[action]} <b>{escape(label)}</b>{escape(extra)}\n"
+            f"<i>{escape(date)}</i>\n{escape(details[:220])}"
+        )
+
+    config = get_config_values()
+    seen_raw = config.get(f"ADMIN_NOTIFICHE_LETTE_{query.from_user.id}", {}).get("value", "0")
+    try:
+        seen = int(seen_raw or 0)
+    except ValueError:
+        seen = 0
+    total_interesting = len(rows)
+    unread = max(total_interesting - seen, 0)
+    body = "\n\n".join(rows[:8]) if rows else "Nessuna notifica recente."
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Segna tutte come lette", callback_data="admin_notifications_read")],
+        [InlineKeyboardButton("⬅️ Pannello Admin", callback_data="admin_home")],
+    ])
+    await _edit_admin_query(
+        query,
+        f"🔔 <b>Centro notifiche</b> · Non lette: <b>{unread}</b>\n\n" + body,
+        reply_markup=keyboard,
+    )
+
+
+async def mark_admin_notifications_read(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await check_admin(update):
+        return
+    query = update.callback_query
+    await query.answer()
+    logs = get_recent_logs(50)
+    interesting_actions = {"USERNAME_AGGIORNATO", "NOTIFICHE_SMISTAMENTO", "BROADCAST", "SPEDIZIONE_COMPLETATA", "UTENTE_REGISTRATO"}
+    count = sum(1 for item in logs if item.get("AZIONE", "") in interesting_actions)
+    set_config_value(f"ADMIN_NOTIFICHE_LETTE_{query.from_user.id}", str(count), True)
+    await show_admin_notifications(update, context)
+
+
+async def show_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await check_admin(update):
+        return
+    query = update.callback_query
+    await query.answer()
+    await _edit_admin_query(
+        query,
+        "💬 <b>Messaggi configurabili</b>\n\n"
+        "Scegli il testo da modificare:",
+        reply_markup=admin_messages_keyboard(),
+    )
+
+
+async def start_message_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await check_admin(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    key = query.data.split(":", 1)[1]
+    current = get_config_values().get(key, {}).get("value", "") or "(testo predefinito)"
+    context.user_data["admin_message_key"] = key
+    await _edit_admin_query(
+        query,
+        "💬 <b>Modifica messaggio</b>\n\n"
+        f"Chiave: <code>{escape(key)}</code>\n\n"
+        f"Testo attuale:\n{escape(current)}\n\n"
+        "Invia il nuovo testo. Per la notifica magazzino puoi usare "
+        "<code>{USERNAME}</code>.",
+        reply_markup=admin_cancel_keyboard("admin_messages"),
+    )
+    return ADMIN_MESSAGE_EDIT
+
+
+async def receive_message_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await check_admin(update):
+        return ConversationHandler.END
+    message = update.effective_message
+    key = context.user_data.pop("admin_message_key", "")
+    text = (message.text or "").strip() if message else ""
+    if not key or not text:
+        if message:
+            await _admin_error_reply(message, "Testo non valido.")
+        return ConversationHandler.END
+    try:
+        set_config_value(key, text, True)
+    except Exception:
+        logger.exception("Errore salvataggio messaggio configurabile")
+        if message:
+            await _admin_error_reply(message, "Impossibile salvare il messaggio.")
+        return ConversationHandler.END
+    if message:
+        await _reply_admin_message(
+            message,
+            "✅ Messaggio aggiornato correttamente.",
+            reply_markup=admin_home_keyboard(),
+        )
+    return ConversationHandler.END
+
+
+async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await check_admin(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    await _edit_admin_query(
+        query,
+        "📣 <b>Broadcast</b>\n\n"
+        "Invia il messaggio da spedire a tutti gli utenti registrati.\n\n"
+        "Prima dell'invio vedrai un'anteprima e dovrai confermare.",
+        reply_markup=admin_cancel_keyboard(),
+    )
+    return ADMIN_BROADCAST
+
+
+async def receive_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Salva l'anteprima: l'invio parte solo dopo conferma esplicita."""
+    if not await check_admin(update):
+        return ConversationHandler.END
+    message_obj = update.effective_message
+    message = (message_obj.text or "").strip() if message_obj else ""
+    if not message:
+        await _admin_error_reply(message_obj, "Messaggio vuoto. Riprova.")
+        return ADMIN_BROADCAST
+
+    context.user_data["pending_broadcast"] = message
+    await _reply_admin_message(
+        message_obj,
+        "📣 <b>Conferma broadcast</b>\n\n"
+        "Il seguente messaggio sarà inviato a tutti gli utenti registrati:\n\n"
+        f"{escape(message)}",
+        reply_markup=admin_broadcast_confirm_keyboard(),
+    )
+    return ADMIN_BROADCAST_CONFIRM
+
+
+async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await check_admin(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    message = context.user_data.pop("pending_broadcast", "")
+    if not message:
+        await _edit_admin_query(
+            query,
+            "⚠️ Anteprima scaduta. Avvia nuovamente il broadcast.",
+            reply_markup=admin_home_keyboard(),
+        )
+        return ConversationHandler.END
+    result = await send_broadcast(context.bot, message)
+    admin = get_admin(update.effective_user.id) or {}
+    write_log(
+        action="BROADCAST",
+        details=f"Inviati={result['sent']}; errori={result['failed']}; destinatari={result['total']}",
+        admin=admin.get("USERNAME", ""),
+    )
+    await _edit_admin_query(
+        query,
+        "✅ <b>Broadcast completato</b>\n\n"
+        f"Inviati: <b>{result['sent']}</b>\n"
+        f"Errori: <b>{result['failed']}</b>",
+        reply_markup=admin_home_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await check_admin(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("pending_broadcast", None)
+    await _edit_admin_query(
+        query,
+        "❌ Broadcast annullato.",
+        reply_markup=admin_home_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+async def cancel_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await check_admin(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("admin_message_key", None)
+    await _edit_admin_query(
+        query,
+        _admin_home_text(),
+        reply_markup=admin_home_keyboard(),
+    )
+    return ConversationHandler.END
 
 
 async def show_pending_shipping_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -245,12 +632,18 @@ async def _show_shipping_requests(update: Update, statuses: set[str] | None, his
         requests = get_all_shipping_requests(statuses=statuses)
     except Exception:
         logger.exception("Errore lettura richieste")
-        await query.edit_message_text("⚠️ Impossibile leggere le richieste.", reply_markup=admin_home_keyboard())
+        await _admin_error_edit(query, "Impossibile leggere le richieste.", reply_markup=admin_home_keyboard())
         return
     title = "🗂 <b>Storico spedizioni</b>" if history else "🚚 <b>Richieste in attesa</b>"
-    await query.edit_message_text(
-        f"{title}\n\nTotale: <b>{len(requests)}</b>" if requests else f"{title}\n\nNessuna richiesta presente.",
-        reply_markup=admin_shipping_list_keyboard(requests, history), parse_mode="HTML",
+    text = (
+        f"{title}\n\nTotale: <b>{len(requests)}</b>"
+        if requests
+        else f"{title}\n\nNessuna richiesta presente."
+    )
+    await _edit_admin_query(
+        query,
+        text,
+        reply_markup=admin_shipping_list_keyboard(requests, history),
     )
 
 
@@ -265,7 +658,7 @@ async def open_shipping_request(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("Richiesta non trovata.", show_alert=True)
         return
     tracking = request.get("TRACKING", "") or "—"
-    text = (
+    text = with_footer(
         "📦 <b>Dettaglio richiesta</b>\n\n"
         f"🆔 <code>{escape(request.get('ID', ''))}</code>\n"
         f"📋 Stato: <b>{escape(request.get('STATO', ''))}</b>\n"
@@ -277,7 +670,11 @@ async def open_shipping_request(update: Update, context: ContextTypes.DEFAULT_TY
         f"{escape(request.get('CAP', ''))} {escape(request.get('CITTA', ''))} ({escape(request.get('PROVINCIA', ''))})\n"
         f"📞 {escape(request.get('TELEFONO', ''))}\n✉️ {escape(request.get('EMAIL', ''))}"
     )
-    await query.edit_message_text(text, reply_markup=admin_shipping_detail_keyboard(shipping_id), parse_mode="HTML")
+    await _edit_admin_query(
+        query,
+        text,
+        reply_markup=admin_shipping_detail_keyboard(shipping_id),
+    )
 
 
 async def show_shipping_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -292,10 +689,19 @@ async def show_shipping_receipt(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("Ricevuta non presente.", show_alert=True)
         return
     try:
-        if "TIPO ALLEGATO: FOTO" in request.get("NOTE", "").upper():
-            await context.bot.send_photo(query.message.chat_id, file_id, caption=f"📎 Ricevuta {shipping_id}")
+        note_text = request.get("NOTE", "").upper() if request else ""
+        if "TIPO ALLEGATO: FOTO" in note_text:
+            await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=file_id,
+                caption=f"📎 Ricevuta {shipping_id}",
+            )
         else:
-            await context.bot.send_document(query.message.chat_id, file_id, caption=f"📎 Ricevuta {shipping_id}")
+            await context.bot.send_document(
+                chat_id=query.message.chat_id,
+                document=file_id,
+                caption=f"📎 Ricevuta {shipping_id}",
+            )
     except Exception:
         logger.exception("Errore invio allegato")
         await query.answer("Impossibile aprire la ricevuta.", show_alert=True)
@@ -311,9 +717,12 @@ async def start_tracking_input(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer("Richiesta non trovata.", show_alert=True)
         return ConversationHandler.END
     context.user_data["admin_tracking_shipping_id"] = shipping_id
-    await query.edit_message_text(
-        f"🚚 <b>Inserimento tracking</b>\n\nRichiesta: <code>{escape(shipping_id)}</code>\n\nInvia il codice tracking.",
-        reply_markup=admin_tracking_cancel_keyboard(), parse_mode="HTML",
+    await _edit_admin_query(
+        query,
+        f"🚚 <b>Inserimento tracking</b>\n\n"
+        f"Richiesta: <code>{escape(shipping_id)}</code>\n\n"
+        "Invia il codice tracking.",
+        reply_markup=admin_tracking_cancel_keyboard(),
     )
     return ADMIN_TRACKING
 
@@ -324,7 +733,7 @@ async def receive_tracking(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     message, user = update.effective_message, update.effective_user
     tracking = message.text.strip() if message and message.text else ""
     if len(tracking) < 4:
-        await message.reply_text("⚠️ Tracking non valido. Riprova.")
+        await _admin_error_reply(message, "Tracking non valido. Riprova.")
         return ADMIN_TRACKING
     shipping_id = context.user_data.get("admin_tracking_shipping_id", "")
     admin_data = get_admin(user.id) or {}
@@ -332,22 +741,36 @@ async def receive_tracking(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         request = complete_shipping_request(shipping_id, tracking, admin_data.get("USERNAME") or str(user.id))
     except Exception:
         logger.exception("Errore completamento spedizione")
-        await message.reply_text("⚠️ Errore durante il salvataggio. Riprova.")
+        await _admin_error_reply(message, "Errore durante il salvataggio. Riprova.")
         return ADMIN_TRACKING
     context.user_data.pop("admin_tracking_shipping_id", None)
     try:
+        shipping_template = get_config_values().get("MSG_SPEDIZIONE", {}).get("value", "").strip()
+        shipping_text = shipping_template or (
+            "📦 <b>La tua spedizione è partita!</b>\n\n"
+            "🆔 <code>{ID}</code>\n🚚 <b>{CORRIERE}</b>\n"
+            "🔎 Tracking: <code>{TRACKING}</code>\n\n"
+            "Trovi tutto nello storico spedizioni."
+        )
+        shipping_text = (
+            shipping_text
+            .replace("{ID}", escape(shipping_id))
+            .replace("{CORRIERE}", escape(request.get("CORRIERE", "")))
+            .replace("{TRACKING}", escape(tracking))
+            .replace("{USERNAME}", escape(request.get("USERNAME", "")))
+        )
         await context.bot.send_message(
             int(request["TELEGRAM_ID"]),
-            "📦 <b>La tua spedizione è partita!</b>\n\n"
-            f"🆔 <code>{escape(shipping_id)}</code>\n🚚 <b>{escape(request.get('CORRIERE', ''))}</b>\n"
-            f"🔎 Tracking: <code>{escape(tracking)}</code>\n\nTrovi tutto nello storico spedizioni.",
+            with_footer(shipping_text),
             parse_mode="HTML",
         )
     except Exception:
         logger.exception("Notifica tracking non inviata")
-    await message.reply_text(
-        f"✅ Spedizione <code>{escape(shipping_id)}</code> aggiornata.\nTracking: <code>{escape(tracking)}</code>",
-        reply_markup=admin_home_keyboard(), parse_mode="HTML",
+    await _reply_admin_message(
+        message,
+        f"✅ Spedizione <code>{escape(shipping_id)}</code> aggiornata.\n"
+        f"Tracking: <code>{escape(tracking)}</code>",
+        reply_markup=admin_home_keyboard(),
     )
     return ConversationHandler.END
 
@@ -358,5 +781,9 @@ async def cancel_tracking_input(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     context.user_data.pop("admin_tracking_shipping_id", None)
-    await query.edit_message_text("❌ Inserimento tracking annullato.", reply_markup=admin_home_keyboard())
+    await _edit_admin_query(
+        query,
+        "❌ Inserimento tracking annullato.",
+        reply_markup=admin_home_keyboard(),
+    )
     return ConversationHandler.END

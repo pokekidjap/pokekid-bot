@@ -38,6 +38,7 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 # Credenziali Google
 # ==========================
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+STARTUP_CHECKS = os.getenv("STARTUP_CHECKS", "true").strip().lower() in {"1", "true", "yes", "on"}
 
 def validate_config() -> None:
     """Controlla le variabili indispensabili prima di avviare il bot."""

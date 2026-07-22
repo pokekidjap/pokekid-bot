@@ -1,6 +1,9 @@
+import asyncio
 import logging
+import time
 from html import escape
 
+from services.perf import start_flow
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -8,18 +11,79 @@ from keyboards.orders import (
     available_orders_keyboard,
     orders_back_keyboard,
     orders_keyboard,
+    orders_pagination_keyboard,
     shipping_carriers_keyboard,
     shipping_summary_keyboard,
 )
 from services.bot_db import (
     get_active_shipping_methods,
+    get_current_datetime,
     get_paypal_email,
     get_profile,
 )
 from services.sheets import get_user_orders
+from services.ui import compact_error, page_title, with_footer
 
 
 logger = logging.getLogger(__name__)
+ORDERS_PER_PAGE = 6
+
+
+def _orders_response(text: str) -> str:
+    return with_footer(text)
+
+
+def _orders_error(
+    query,
+    message: str,
+    reply_markup=None,
+) -> None:
+    return query.edit_message_text(
+        compact_error(message),
+        reply_markup=reply_markup,
+        parse_mode="HTML",
+    )
+
+
+def _clear_shipping_session_data(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    shipping_keys = [
+        "available_orders",
+        "selected_order_rows",
+        "selected_orders",
+        "shipping_profile",
+        "shipping_methods",
+        "selected_carrier",
+        "waiting_shipping_receipt",
+    ]
+
+    for key in shipping_keys:
+        context.user_data.pop(key, None)
+
+
+def _order_icon(status: str) -> str:
+    return "🟢" if status == "IN MAGAZZINO" else "🟡"
+
+
+def _get_orders_page(
+    orders: list[dict],
+    page: int,
+) -> list[dict]:
+    start = (page - 1) * ORDERS_PER_PAGE
+    end = start + ORDERS_PER_PAGE
+    return orders[start:end]
+
+
+def _parse_orders_page(query) -> int:
+    data = query.data or ""
+    if ":" in data:
+        try:
+            page = int(data.split(":", 1)[1])
+            return max(page, 1)
+        except ValueError:
+            return 1
+    return 1
 
 
 def get_available_orders(
@@ -70,7 +134,7 @@ def build_available_orders_text(
         if order["row_number"] in selected_rows
     )
 
-    return (
+    return with_footer(
         "🟢 <b>Ordini disponibili</b>\n\n"
         "Seleziona gli articoli che vuoi ricevere.\n\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
@@ -90,16 +154,19 @@ async def show_orders_menu(
 ) -> None:
     query = update.callback_query
 
-    await query.answer()
-
-    await query.edit_message_text(
-        text=(
-            "📦 <b>I miei ordini</b>\n\n"
-            "Scegli cosa vuoi consultare:"
-        ),
-        reply_markup=orders_keyboard(),
-        parse_mode="HTML",
-    )
+    with start_flow("orders_menu"):
+        await query.answer()
+        await query.edit_message_text(
+            with_footer(
+                page_title(
+                    "📦",
+                    "I miei ordini",
+                    "Scegli cosa vuoi consultare",
+                )
+            ),
+            reply_markup=orders_keyboard(),
+            parse_mode="HTML",
+        )
 
 
 async def show_available_orders(
@@ -109,65 +176,58 @@ async def show_available_orders(
     query = update.callback_query
     username = query.from_user.username
 
-    await query.answer()
+    with start_flow("orders_available"):
+        await query.answer()
 
-    if not username:
-        await query.edit_message_text(
-            text=(
-                "⚠️ <b>Username Telegram "
-                "non disponibile</b>\n\n"
-                "Per consultare i tuoi ordini devi "
-                "impostare uno username nelle "
-                "impostazioni di Telegram."
-            ),
-            reply_markup=orders_back_keyboard(),
-            parse_mode="HTML",
-        )
-        return
+        if not username:
+            await query.edit_message_text(
+                text=_orders_response(
+                    "⚠️ <b>Username Telegram non disponibile</b>\n\n"
+                    "Per consultare i tuoi ordini devi impostare uno username nelle impostazioni di Telegram."
+                ),
+                reply_markup=orders_back_keyboard(),
+                parse_mode="HTML",
+            )
+            return
 
-    try:
-        available_orders = get_available_orders(
-            username
-        )
+        try:
+            available_orders = get_available_orders(
+                username
+            )
 
-    except Exception:
-        logger.exception(
-            "Errore durante la lettura "
-            "degli ordini disponibili"
-        )
+        except Exception:
+            logger.exception(
+                "Errore durante la lettura degli ordini disponibili"
+            )
 
-        await query.edit_message_text(
-            text=(
-                "⚠️ <b>Servizio momentaneamente "
-                "non disponibile</b>\n\n"
-                "Riprova tra qualche minuto."
-            ),
-            reply_markup=orders_back_keyboard(),
-            parse_mode="HTML",
-        )
-        return
+            await _orders_error(
+                query,
+                "Riprova tra qualche minuto.",
+                reply_markup=orders_back_keyboard(),
+            )
+            return
 
-    context.user_data[
-        "available_orders"
-    ] = available_orders
+        context.user_data[
+            "available_orders"
+        ] = available_orders
 
-    context.user_data[
-        "selected_order_rows"
-    ] = set()
+        context.user_data[
+            "selected_order_rows"
+        ] = set()
 
-    text = build_available_orders_text(
-        available_orders,
-        set(),
-    )
-
-    await query.edit_message_text(
-        text=text,
-        reply_markup=available_orders_keyboard(
+        text = build_available_orders_text(
             available_orders,
             set(),
-        ),
-        parse_mode="HTML",
-    )
+        )
+
+        await query.edit_message_text(
+            text=_orders_response(text),
+            reply_markup=available_orders_keyboard(
+                available_orders,
+                set(),
+            ),
+            parse_mode="HTML",
+        )
 
 
 async def toggle_available_order(
@@ -262,12 +322,13 @@ async def continue_shipping_request(
     query = update.callback_query
     user = query.from_user
 
-    await query.answer()
+    with start_flow("shipping_start"):
+        await query.answer()
 
-    available_orders = context.user_data.get(
-        "available_orders",
-        [],
-    )
+        available_orders = context.user_data.get(
+            "available_orders",
+            [],
+        )
 
     selected_rows = context.user_data.get(
         "selected_order_rows",
@@ -288,8 +349,9 @@ async def continue_shipping_request(
         return
 
     try:
-        profile = get_profile(
-            user.id
+        profile = await asyncio.to_thread(
+            get_profile,
+            user.id,
         )
 
     except Exception:
@@ -297,25 +359,18 @@ async def continue_shipping_request(
             "Errore durante la lettura del profilo"
         )
 
-        await query.edit_message_text(
-            text=(
-                "⚠️ <b>Impossibile leggere "
-                "i dati di spedizione.</b>\n\n"
-                "Riprova tra qualche minuto."
-            ),
+        await _orders_error(
+            query,
+            "Impossibile leggere i dati di spedizione.",
             reply_markup=orders_back_keyboard(),
-            parse_mode="HTML",
         )
         return
 
     if not profile:
         await query.edit_message_text(
-            text=(
-                "⚠️ <b>Dati di spedizione "
-                "mancanti</b>\n\n"
-                "Prima di richiedere una spedizione "
-                "devi inserire i tuoi dati nella "
-                "sezione Profilo."
+            text=_orders_response(
+                "⚠️ <b>Dati di spedizione mancanti</b>\n\n"
+                "Prima di richiedere una spedizione devi inserire i tuoi dati nella sezione Profilo."
             ),
             reply_markup=orders_back_keyboard(),
             parse_mode="HTML",
@@ -329,28 +384,21 @@ async def continue_shipping_request(
 
     except Exception:
         logger.exception(
-            "Errore durante la lettura "
-            "dei corrieri"
+            "Errore durante la lettura dei corrieri"
         )
 
-        await query.edit_message_text(
-            text=(
-                "⚠️ <b>Impossibile caricare "
-                "i corrieri disponibili.</b>\n\n"
-                "Riprova tra qualche minuto."
-            ),
+        await _orders_error(
+            query,
+            "Riprova tra qualche minuto.",
             reply_markup=orders_back_keyboard(),
-            parse_mode="HTML",
         )
         return
 
     if not shipping_methods:
         await query.edit_message_text(
-            text=(
-                "⚠️ <b>Nessun corriere "
-                "disponibile</b>\n\n"
-                "Al momento non risultano metodi "
-                "di spedizione attivi."
+            text=_orders_response(
+                "⚠️ <b>Nessun corriere disponibile</b>\n\n"
+                "Al momento non risultano metodi di spedizione attivi."
             ),
             reply_markup=orders_back_keyboard(),
             parse_mode="HTML",
@@ -368,6 +416,10 @@ async def continue_shipping_request(
     context.user_data[
         "shipping_methods"
     ] = shipping_methods
+
+    context.user_data[
+        "shipping_selection_timestamp"
+    ] = get_current_datetime()
 
     product_lines = []
 
@@ -387,7 +439,7 @@ async def continue_shipping_request(
     )
 
     await query.edit_message_text(
-        text=text,
+        text=_orders_response(text),
         reply_markup=shipping_carriers_keyboard(
             shipping_methods
         ),
@@ -496,7 +548,7 @@ async def select_shipping_carrier(
     )
 
     await query.edit_message_text(
-        text=text,
+        text=with_footer(text),
         reply_markup=shipping_summary_keyboard(),
         parse_mode="HTML",
     )
@@ -510,25 +562,11 @@ async def cancel_shipping_request(
 
     await query.answer()
 
-    shipping_keys = [
-        "available_orders",
-        "selected_order_rows",
-        "selected_orders",
-        "shipping_profile",
-        "shipping_methods",
-        "selected_carrier",
-    ]
-
-    for key in shipping_keys:
-        context.user_data.pop(
-            key,
-            None,
-        )
+    _clear_shipping_session_data(context)
 
     await query.edit_message_text(
-        text=(
-            "❌ <b>Richiesta di spedizione "
-            "annullata</b>\n\n"
+        text=with_footer(
+            "❌ <b>Richiesta di spedizione annullata</b>\n\n"
             "Nessuna richiesta è stata salvata."
         ),
         reply_markup=orders_back_keyboard(),
@@ -543,21 +581,22 @@ async def show_all_orders(
     query = update.callback_query
     username = query.from_user.username
 
-    await query.answer()
+    with start_flow("orders_all"):
+        await query.answer()
 
-    if not username:
-        await query.edit_message_text(
-            text=(
-                "⚠️ <b>Username Telegram "
-                "non disponibile</b>\n\n"
-                "Per consultare i tuoi ordini devi "
-                "impostare uno username nelle "
-                "impostazioni di Telegram."
-            ),
-            reply_markup=orders_back_keyboard(),
-            parse_mode="HTML",
-        )
-        return
+        if not username:
+            await query.edit_message_text(
+                text=(
+                    "⚠️ <b>Username Telegram "
+                    "non disponibile</b>\n\n"
+                    "Per consultare i tuoi ordini devi "
+                    "impostare uno username nelle "
+                    "impostazioni di Telegram."
+                ),
+                reply_markup=orders_back_keyboard(),
+                parse_mode="HTML",
+            )
+            return
 
     try:
         orders = get_user_orders(
@@ -605,50 +644,48 @@ async def show_all_orders(
             "📦 <b>I miei ordini</b>\n\n"
             "━━━━━━━━━━━━━━━━━━\n\n"
             f"👤 <b>{escape(display_username)}</b>\n\n"
-            "Non risultano ordini associati "
-            "al tuo account.\n\n"
+            "Non risultano ordini associati al tuo account.\n\n"
             "━━━━━━━━━━━━━━━━━━"
         )
-
+        keyboard = orders_back_keyboard()
     else:
+        total_pages = max(
+            1,
+            (len(orders) + ORDERS_PER_PAGE - 1) // ORDERS_PER_PAGE,
+        )
+        page = _parse_orders_page(query)
+        page = min(page, total_pages)
+        page_orders = _get_orders_page(orders, page)
+
         articles = []
-
-        for order in orders:
-            if order["status"] == "IN MAGAZZINO":
-                icon = "🟢"
-            else:
-                icon = "🟡"
-
-            quantity_text = ""
-
-            if order["quantity"] > 1:
-                quantity_text = (
-                    f" ×{order['quantity']}"
-                )
-
+        for order in page_orders:
+            icon = _order_icon(order["status"])
+            quantity_text = (
+                f" ×{order['quantity']}"
+                if order["quantity"] > 1
+                else ""
+            )
             articles.append(
                 f"{icon} "
                 f"<b>{escape(order['name'])}</b>"
                 f"{quantity_text}"
+                f" · {escape(order['status'])}"
             )
 
         text = (
             "📦 <b>I miei ordini</b>\n\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 <b>{escape(display_username)}</b>\n\n"
-            f"📦 Totale articoli: "
-            f"<b>{total_items}</b>\n"
-            f"🟢 Disponibili: "
-            f"<b>{available_items}</b>\n"
-            f"🟡 In attesa: "
-            f"<b>{pending_items}</b>\n\n"
+            f"👤 <b>{escape(display_username)}</b>\n"
+            f"📦 Totale articoli: <b>{total_items}</b> · "
+            f"🟢 Disponibili: <b>{available_items}</b> · "
+            f"🟡 In attesa: <b>{pending_items}</b>\n\n"
+            f"Pagina <b>{page}</b> di <b>{total_pages}</b>\n"
             "━━━━━━━━━━━━━━━━━━\n\n"
             + "\n\n".join(articles)
-            + "\n\n━━━━━━━━━━━━━━━━━━"
         )
+        keyboard = orders_pagination_keyboard(page, total_pages)
 
     await query.edit_message_text(
-        text=text,
-        reply_markup=orders_back_keyboard(),
+        text=_orders_response(text),
+        reply_markup=keyboard,
         parse_mode="HTML",
     )

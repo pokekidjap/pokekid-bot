@@ -48,6 +48,50 @@ def orders_back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
+def orders_pagination_keyboard(
+    page: int,
+    total_pages: int,
+) -> InlineKeyboardMarkup:
+    keyboard = []
+
+    if page > 1 or page < total_pages:
+        row = []
+        if page > 1:
+            row.append(
+                InlineKeyboardButton(
+                    "⬅️ Pagina precedente",
+                    callback_data=f"orders_all:{page - 1}",
+                )
+            )
+        if page < total_pages:
+            row.append(
+                InlineKeyboardButton(
+                    "➡️ Pagina successiva",
+                    callback_data=f"orders_all:{page + 1}",
+                )
+            )
+        keyboard.append(row)
+
+    keyboard.extend(
+        [
+            [
+                InlineKeyboardButton(
+                    "⬅️ Torna agli ordini",
+                    callback_data="menu_orders",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🏠 Menu principale",
+                    callback_data="menu_home",
+                )
+            ],
+        ]
+    )
+
+    return InlineKeyboardMarkup(keyboard)
+
+
 def available_orders_keyboard(
     available_orders: list[dict],
     selected_rows: set[int],

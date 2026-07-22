@@ -1,6 +1,10 @@
+import logging
+
 import gspread
 
 from config import SPREADSHEET_ID
+from services.cache import get_or_set
+from services.retry import call_with_retry
 from services.sheets import (
     get_google_credentials,
     normalize_header,
@@ -8,6 +12,8 @@ from services.sheets import (
 
 
 GRADING_WORKSHEET_NAME = "GRADING"
+
+logger = logging.getLogger(__name__)
 
 REQUIRED_HEADERS = {
     "GRADING",
@@ -28,13 +34,13 @@ def get_grading_worksheet():
 
     credentials = get_google_credentials()
     client = gspread.authorize(credentials)
-
-    spreadsheet = client.open_by_key(
-        SPREADSHEET_ID
+    spreadsheet = call_with_retry(
+        lambda: client.open_by_key(SPREADSHEET_ID),
+        operation_name="apertura foglio grading",
     )
-
-    return spreadsheet.worksheet(
-        GRADING_WORKSHEET_NAME
+    return call_with_retry(
+        lambda: spreadsheet.worksheet(GRADING_WORKSHEET_NAME),
+        operation_name="apertura scheda grading",
     )
 
 
@@ -69,7 +75,7 @@ def find_grading_header_row(
     )
 
 
-def get_grading_records() -> list[dict]:
+def _load_grading_records() -> list[dict]:
     """
     Legge la tabella dello stato SUB presente nella scheda GRADING.
 
@@ -77,7 +83,7 @@ def get_grading_records() -> list[dict]:
     può trovarsi anche nelle colonne X, Y, Z e AA.
     """
     worksheet = get_grading_worksheet()
-    values = worksheet.get_all_values()
+    values = call_with_retry(worksheet.get_all_values, operation_name="lettura grading")
 
     if not values:
         return []
@@ -129,10 +135,7 @@ def get_grading_records() -> list[dict]:
 
         # Ignora eventuali righe incomplete.
         if not grading or not sub or not status:
-            print(
-                f"RIGA {row_number} IGNORATA: "
-                "dati della SUB incompleti."
-            )
+            logger.warning("Riga %s GRADING ignorata: dati incompleti", row_number)
             continue
 
         records.append(
@@ -144,10 +147,8 @@ def get_grading_records() -> list[dict]:
             }
         )
 
-    print("--------------------------------")
-    print("TABELLA STATO SUB TROVATA")
-    print("RIGA INTESTAZIONI:", header_row_index + 1)
-    print("SUB LETTE:", len(records))
-    print("--------------------------------")
-
     return records
+
+def get_grading_records(force_refresh: bool = False) -> list[dict]:
+    """Restituisce le SUB con cache dedicata di 60 secondi."""
+    return get_or_set("grading:records", _load_grading_records, force=force_refresh)

@@ -2,25 +2,10 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 def home_keyboard() -> InlineKeyboardMarkup:
-    keyboard = [
+    return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(
-                "📦 I miei ordini",
-                callback_data="menu_orders",
-            )
+            InlineKeyboardButton("📦 I miei ordini", callback_data="menu_orders"),
+            InlineKeyboardButton("🎴 Le mie SUB", callback_data="menu_grading"),
         ],
-        [
-            InlineKeyboardButton(
-                "🎴 Le mie SUB Grading",
-                callback_data="menu_grading",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "👤 Profilo",
-                callback_data="menu_profile",
-            )
-        ],
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
+        [InlineKeyboardButton("👤 Profilo", callback_data="menu_profile")],
+    ])

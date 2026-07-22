@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 from html import escape
 
@@ -19,8 +20,12 @@ from keyboards.profile import (
 from services.bot_db import (
     delete_profile,
     get_profile,
+    get_user_shipping_requests,
     save_profile,
 )
+from services.ui import with_footer
+
+logger = logging.getLogger(__name__)
 
 
 (
@@ -190,6 +195,7 @@ async def show_profile(
     Mostra la schermata principale del Profilo.
     """
     query = update.callback_query
+    await query.answer()
     user = query.from_user
 
     try:
@@ -200,29 +206,27 @@ async def show_profile(
 
     except Exception:
         await query.edit_message_text(
-            text=(
+            text=with_footer(
                 "❌ Non è stato possibile leggere il profilo.\n\n"
                 "Riprova tra qualche minuto."
             ),
             reply_markup=profile_back_keyboard(),
+            parse_mode="HTML",
         )
         return
 
     if profile:
-        text = (
+        text = with_footer(
             "👤 <b>Il mio profilo</b>\n\n"
             "✅ Hai già dei dati di spedizione salvati.\n\n"
-            "Da questa sezione puoi visualizzarli, "
-            "modificarli oppure cancellarli."
+            "Da questa sezione puoi visualizzarli, modificare o cancellare."
         )
 
     else:
-        text = (
+        text = with_footer(
             "👤 <b>Il mio profilo</b>\n\n"
-            "Non hai ancora inserito i tuoi dati "
-            "di spedizione.\n\n"
-            "Potrai salvarli per velocizzare le future "
-            "richieste di spedizione.\n\n"
+            "Non hai ancora inserito i tuoi dati di spedizione.\n\n"
+            "Potrai salvarli per velocizzare le future richieste di spedizione.\n\n"
             f"{PRIVACY_TEXT}"
         )
 
@@ -243,6 +247,7 @@ async def show_profile_shipping_data(
     Visualizza i dati di spedizione salvati.
     """
     query = update.callback_query
+    await query.answer()
     user = query.from_user
 
     try:
@@ -253,17 +258,17 @@ async def show_profile_shipping_data(
 
     except Exception:
         await query.edit_message_text(
-            text=(
-                "❌ Non è stato possibile leggere "
-                "i dati di spedizione."
+            text=with_footer(
+                "❌ Non è stato possibile leggere i dati di spedizione."
             ),
             reply_markup=profile_back_keyboard(),
+            parse_mode="HTML",
         )
         return
 
     if not profile:
         await query.edit_message_text(
-            text=(
+            text=with_footer(
                 "📍 <b>Dati di spedizione</b>\n\n"
                 "Non risultano dati salvati."
             ),
@@ -275,9 +280,7 @@ async def show_profile_shipping_data(
         return
 
     await query.edit_message_text(
-        text=format_profile_data(
-            profile
-        ),
+        text=with_footer(format_profile_data(profile)),
         reply_markup=profile_data_keyboard(),
         parse_mode="HTML",
     )
@@ -291,12 +294,12 @@ async def ask_profile_delete_confirmation(
     Chiede conferma prima di eliminare il profilo.
     """
     query = update.callback_query
+    await query.answer()
 
     await query.edit_message_text(
-        text=(
+        text=with_footer(
             "🗑 <b>Eliminazione dati</b>\n\n"
-            "Confermi di voler eliminare tutti i dati "
-            "di spedizione salvati?\n\n"
+            "Confermi di voler eliminare tutti i dati di spedizione salvati?\n\n"
             "Questa operazione non può essere annullata."
         ),
         reply_markup=profile_delete_confirmation_keyboard(),
@@ -312,6 +315,7 @@ async def remove_profile(
     Elimina i dati di spedizione dell'utente.
     """
     query = update.callback_query
+    await query.answer()
     user = query.from_user
 
     try:
@@ -322,25 +326,25 @@ async def remove_profile(
         )
 
     except Exception:
+        logger.exception("Errore eliminazione profilo %s", user.id)
         await query.edit_message_text(
-            text=(
-                "❌ Non è stato possibile eliminare "
-                "i dati salvati.\n\n"
+            text=with_footer(
+                "❌ Non è stato possibile eliminare i dati salvati.\n\n"
                 "Riprova tra qualche minuto."
             ),
             reply_markup=profile_back_keyboard(),
+            parse_mode="HTML",
         )
         return
 
     if deleted:
-        text = (
+        text = with_footer(
             "✅ <b>Dati eliminati</b>\n\n"
-            "I tuoi dati di spedizione sono stati "
-            "cancellati correttamente."
+            "I tuoi dati di spedizione sono stati cancellati correttamente."
         )
 
     else:
-        text = (
+        text = with_footer(
             "ℹ️ <b>Nessun dato trovato</b>\n\n"
             "Non risultano dati di spedizione salvati."
         )
@@ -362,14 +366,59 @@ async def show_profile_shipments(
     Mostra la sezione delle spedizioni dell'utente.
     """
     query = update.callback_query
+    await query.answer()
+    user = query.from_user
+
+    try:
+        shipping_requests = await asyncio.to_thread(
+            get_user_shipping_requests,
+            user.id,
+        )
+    except Exception:
+        await query.edit_message_text(
+            text=with_footer(
+                "⚠️ <b>Impossibile leggere le spedizioni</b>\n\n"
+                "Riprova tra qualche minuto."
+            ),
+            reply_markup=profile_back_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    if not shipping_requests:
+        await query.edit_message_text(
+            text=with_footer(
+                "🚚 <b>Le mie spedizioni</b>\n\n"
+                "Non risultano ancora richieste di spedizione.\n\n"
+                "In questa sezione potrai visualizzare lo stato "
+                "delle richieste, il corriere e il tracking."
+            ),
+            reply_markup=profile_back_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    lines = []
+    for request in shipping_requests[:15]:
+        icon = "✅" if request.get("STATO") == "SPEDITO" else "🟡"
+        tracking = request.get("TRACKING", "")
+        details = [
+            f"🆔 <code>{escape(request.get('ID', ''))}</code>",
+            f"🚚 {escape(request.get('CORRIERE', ''))}",
+            f"📍 {escape(request.get('CITTA', ''))} ({escape(request.get('PROVINCIA', ''))})",
+            f"📋 Stato: <b>{escape(request.get('STATO', ''))}</b>",
+        ]
+        if tracking:
+            details.append(f"🔎 Tracking: <code>{escape(tracking)}</code>")
+        lines.append(f"{icon} " + " · ".join(details))
+
+    text = with_footer(
+        "🚚 <b>Le mie spedizioni</b>\n\n"
+        + "\n\n".join(lines)
+    )
 
     await query.edit_message_text(
-        text=(
-            "🚚 <b>Le mie spedizioni</b>\n\n"
-            "Non risultano ancora richieste di spedizione.\n\n"
-            "In questa sezione potrai visualizzare lo stato "
-            "delle richieste, il corriere e il tracking."
-        ),
+        text=with_footer(text),
         reply_markup=profile_back_keyboard(),
         parse_mode="HTML",
     )
@@ -388,7 +437,7 @@ async def start_profile_form(
     context.user_data["profile_form"] = {}
 
     await query.edit_message_text(
-        text=(
+        text=with_footer(
             "👤 <b>Inserimento dati di spedizione</b>\n\n"
             "Scrivi il tuo <b>nome e cognome</b>.\n\n"
             "Esempio:\n"
@@ -415,14 +464,17 @@ async def receive_profile_name(
 
     if len(name) < 3:
         await update.message.reply_text(
-            "⚠️ Inserisci un nome e cognome validi."
+            text=with_footer(
+                "⚠️ Inserisci un nome e cognome validi."
+            ),
+            parse_mode="HTML",
         )
         return PROFILE_NAME
 
     context.user_data["profile_form"]["name"] = name
 
     await update.message.reply_text(
-        text=(
+        text=with_footer(
             "📧 Inserisci il tuo <b>indirizzo email</b>.\n\n"
             "Esempio:\n"
             "<code>mario@email.it</code>"
@@ -454,17 +506,19 @@ async def receive_profile_email(
         email,
     ):
         await update.message.reply_text(
-            "⚠️ L'indirizzo email non sembra valido.\n\n"
-            "Inseriscilo nuovamente."
+            text=with_footer(
+                "⚠️ L'indirizzo email non sembra valido.\n\n"
+                "Inseriscilo nuovamente."
+            ),
+            parse_mode="HTML",
         )
         return PROFILE_EMAIL
 
     context.user_data["profile_form"]["email"] = email
 
     await update.message.reply_text(
-        text=(
-            "📞 Inserisci il tuo "
-            "<b>numero di telefono</b>.\n\n"
+        text=with_footer(
+            "📞 Inserisci il tuo <b>numero di telefono</b>.\n\n"
             "Esempio:\n"
             "<code>3471234567</code>"
         ),
@@ -493,17 +547,19 @@ async def receive_profile_phone(
         phone,
     ):
         await update.message.reply_text(
-            "⚠️ Il numero di telefono non sembra valido.\n\n"
-            "Inseriscilo nuovamente."
+            text=with_footer(
+                "⚠️ Il numero di telefono non sembra valido.\n\n"
+                "Inseriscilo nuovamente."
+            ),
+            parse_mode="HTML",
         )
         return PROFILE_PHONE
 
     context.user_data["profile_form"]["phone"] = phone
 
     await update.message.reply_text(
-        text=(
-            "🏠 Inserisci il tuo "
-            "<b>indirizzo completo</b>.\n\n"
+        text=with_footer(
+            "🏠 Inserisci il tuo <b>indirizzo completo</b>.\n\n"
             "Scrivi via, numero civico ed eventuale interno.\n\n"
             "Esempio:\n"
             "<code>Via Roma 25, interno 3</code>"
@@ -528,14 +584,17 @@ async def receive_profile_address(
 
     if len(address) < 5:
         await update.message.reply_text(
-            "⚠️ Inserisci un indirizzo completo."
+            text=with_footer(
+                "⚠️ Inserisci un indirizzo completo."
+            ),
+            parse_mode="HTML",
         )
         return PROFILE_ADDRESS
 
     context.user_data["profile_form"]["address"] = address
 
     await update.message.reply_text(
-        text=(
+        text=with_footer(
             "📮 Inserisci il <b>CAP</b>.\n\n"
             "Esempio:\n"
             "<code>16121</code>"
@@ -563,7 +622,10 @@ async def receive_profile_postal_code(
         postal_code,
     ):
         await update.message.reply_text(
-            "⚠️ Il CAP deve essere composto da 5 numeri."
+            text=with_footer(
+                "⚠️ Il CAP deve essere composto da 5 numeri."
+            ),
+            parse_mode="HTML",
         )
         return PROFILE_POSTAL_CODE
 
@@ -572,7 +634,7 @@ async def receive_profile_postal_code(
     ] = postal_code
 
     await update.message.reply_text(
-        text=(
+        text=with_footer(
             "🏙 Inserisci la <b>città</b>.\n\n"
             "Esempio:\n"
             "<code>Genova</code>"
@@ -597,16 +659,18 @@ async def receive_profile_city(
 
     if len(city) < 2:
         await update.message.reply_text(
-            "⚠️ Inserisci una città valida."
+            text=with_footer(
+                "⚠️ Inserisci una città valida."
+            ),
+            parse_mode="HTML",
         )
         return PROFILE_CITY
 
     context.user_data["profile_form"]["city"] = city
 
     await update.message.reply_text(
-        text=(
-            "📍 Inserisci la sigla della "
-            "<b>provincia</b>.\n\n"
+        text=with_footer(
+            "📍 Inserisci la sigla della <b>provincia</b>.\n\n"
             "Esempio:\n"
             "<code>GE</code>"
         ),
@@ -633,9 +697,11 @@ async def receive_profile_province(
         province,
     ):
         await update.message.reply_text(
-            "⚠️ Inserisci la sigla della provincia "
-            "con due lettere.\n\n"
-            "Esempio: GE"
+            text=with_footer(
+                "⚠️ Inserisci la sigla della provincia con due lettere.\n\n"
+                "Esempio: GE"
+            ),
+            parse_mode="HTML",
         )
         return PROFILE_PROVINCE
 
@@ -648,9 +714,7 @@ async def receive_profile_province(
     ]
 
     await update.message.reply_text(
-        text=format_profile_review(
-            data
-        ),
+        text=with_footer(format_profile_review(data)),
         reply_markup=profile_form_review_keyboard(),
         parse_mode="HTML",
     )
@@ -689,11 +753,12 @@ async def save_profile_form(
         data.keys()
     ):
         await query.edit_message_text(
-            text=(
+            text=with_footer(
                 "❌ I dati inseriti risultano incompleti.\n\n"
                 "Ricomincia la procedura dal Profilo."
             ),
             reply_markup=profile_back_keyboard(),
+            parse_mode="HTML",
         )
 
         context.user_data.pop(
@@ -718,12 +783,14 @@ async def save_profile_form(
         )
 
     except Exception:
+        logger.exception("Errore salvataggio profilo %s", user.id)
         await query.edit_message_text(
-            text=(
+            text=with_footer(
                 "❌ Non è stato possibile salvare i dati.\n\n"
                 "Riprova tra qualche minuto."
             ),
             reply_markup=profile_back_keyboard(),
+            parse_mode="HTML",
         )
 
         return ConversationHandler.END
@@ -734,7 +801,7 @@ async def save_profile_form(
     )
 
     await query.edit_message_text(
-        text=(
+        text=with_footer(
             "✅ <b>Dati salvati correttamente</b>\n\n"
             "I tuoi dati di spedizione sono stati registrati.\n\n"
             "Potrai modificarli o cancellarli in qualsiasi momento."
@@ -761,10 +828,9 @@ async def restart_profile_form(
     context.user_data["profile_form"] = {}
 
     await query.edit_message_text(
-        text=(
+        text=with_footer(
             "✏️ <b>Ricomincia inserimento</b>\n\n"
-            "Scrivi nuovamente il tuo "
-            "<b>nome e cognome</b>."
+            "Scrivi nuovamente il tuo <b>nome e cognome</b>."
         ),
         reply_markup=profile_form_cancel_keyboard(),
         parse_mode="HTML",
@@ -790,7 +856,7 @@ async def cancel_profile_form(
         await query.answer()
 
         await query.edit_message_text(
-            text=(
+            text=with_footer(
                 "❌ <b>Inserimento annullato</b>\n\n"
                 "Nessun dato è stato salvato."
             ),
