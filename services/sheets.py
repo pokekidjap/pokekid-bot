@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 import gspread
@@ -10,6 +11,8 @@ from config import (
     WORKSHEET_NAME,
 )
 
+
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CREDENTIALS_FILE = BASE_DIR / "credentials.json"
@@ -155,7 +158,7 @@ def get_sheet_records() -> list[dict]:
     values = worksheet.get_all_values()
 
     if not values:
-        print("Il foglio è vuoto.")
+        logger.info("Il foglio ordini è vuoto.")
         return []
 
     raw_headers = values[0]
@@ -186,10 +189,11 @@ def get_sheet_records() -> list[dict]:
 
         records.append(row)
 
-    print("--------------------------------")
-    print("INTESTAZIONI LETTE:", headers)
-    print("RIGHE LETTE:", len(records))
-    print("--------------------------------")
+    logger.debug(
+        "Foglio ordini letto: %s righe, intestazioni=%s",
+        len(records),
+        headers,
+    )
 
     return records
 
@@ -211,7 +215,7 @@ def get_user_orders(
     )
 
     if not normalized_username:
-        print("Username Telegram assente.")
+        logger.info("Username Telegram assente.")
         return []
 
     records = get_sheet_records()
@@ -224,11 +228,7 @@ def get_user_orders(
         "GRADING",
     }
 
-    print("--------------------------------")
-    print(
-        "USERNAME TELEGRAM:",
-        normalized_username,
-    )
+    logger.debug("Ricerca ordini per %s", normalized_username)
 
     for row_number, row in enumerate(
         records,
@@ -249,9 +249,10 @@ def get_user_orders(
         ).strip().upper()
 
         if status in excluded_statuses:
-            print(
-                f"RIGA {row_number} ESCLUSA: "
-                f"STATO {status}"
+            logger.debug(
+                "Riga %s esclusa per stato %s",
+                row_number,
+                status,
             )
             continue
 

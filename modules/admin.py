@@ -84,14 +84,15 @@ async def show_user_orders_detail(update: Update, context: ContextTypes.DEFAULT_
         return
 
     query = update.callback_query
-    await query.answer()
 
     try:
         index = int(query.data.split(":", 1)[1])
         user = context.user_data.get("admin_order_users", [])[index]
-    except (ValueError, IndexError):
+    except (ValueError, IndexError, AttributeError):
         await query.answer("Elenco scaduto: aggiorna.", show_alert=True)
         return
+
+    await query.answer()
 
     status_icons = {
         "IN MAGAZZINO": "🟢",

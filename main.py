@@ -12,7 +12,7 @@ from telegram.ext import (
     filters,
 )
 
-from config import BOT_TOKEN, PORT, WEBHOOK_SECRET
+from config import BOT_TOKEN, PORT, WEBHOOK_SECRET, validate_config
 from keyboards.home import home_keyboard
 from modules.admin import (
     ADMIN_TRACKING,
@@ -320,6 +320,18 @@ def build_admin_tracking_handler() -> ConversationHandler:
     )
 
 
+
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Registra gli errori non gestiti senza interrompere il bot."""
+    logger.error(
+        "Eccezione non gestita durante un aggiornamento Telegram",
+        exc_info=context.error,
+    )
+
+
 def register_handlers(application: Application) -> None:
     application.add_handler(
         CommandHandler("start", start)
@@ -455,10 +467,7 @@ def run_application(application: Application) -> None:
 
 
 def main() -> None:
-    if not BOT_TOKEN:
-        raise RuntimeError(
-            "BOT_TOKEN non trovato."
-        )
+    validate_config()
 
     application = (
         Application.builder()
@@ -467,6 +476,7 @@ def main() -> None:
     )
 
     register_handlers(application)
+    application.add_error_handler(error_handler)
     run_application(application)
 
 

@@ -16,8 +16,12 @@ def admin_home_keyboard() -> InlineKeyboardMarkup:
 def admin_users_keyboard(users: list[dict]) -> InlineKeyboardMarkup:
     rows = []
     for index, user in enumerate(users[:50]):
+        username = str(user.get("username", ""))
+        if len(username) > 24:
+            username = username[:21] + "..."
+
         rows.append([InlineKeyboardButton(
-            f"👤 {user['username']} · 🟢 {user['ready_quantity']}/{user['total_quantity']}",
+            f"👤 {username} · 🟢 {user['ready_quantity']}/{user['total_quantity']}",
             callback_data=f"admin_user_orders:{index}",
         )])
     rows.append([InlineKeyboardButton("⬅️ Pannello Admin", callback_data="admin_home")])
