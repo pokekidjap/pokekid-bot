@@ -235,7 +235,6 @@ def get_admins(
     Se active_only è True, restituisce solamente
     gli amministratori con ATTIVO impostato su TRUE.
     """
-    worksheet = get_admin_worksheet()
     values = _cached_values("admins", get_admin_worksheet)
 
     if len(values) < 2:
@@ -379,7 +378,6 @@ def get_profile(
     if not telegram_id:
         return None
 
-    worksheet = get_profiles_worksheet()
     values = get_profile_values()
 
     if len(values) < 2:
@@ -680,7 +678,6 @@ def get_config_values() -> dict:
     oppure:
     CHIAVE | VALORE | ATTIVO
     """
-    worksheet = get_config_worksheet()
     values = _cached_values("config", get_config_worksheet)
 
     if len(values) < 2:
@@ -1340,7 +1337,6 @@ def get_bot_status() -> dict:
 
 def get_recent_logs(limit: int = 15) -> list[dict]:
     """Restituisce gli ultimi eventi del foglio LOG, dal più recente."""
-    worksheet = get_log_worksheet()
     values = _cached_values("logs", get_log_worksheet)
     if len(values) < 2:
         return []

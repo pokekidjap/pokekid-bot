@@ -12,7 +12,6 @@ from telegram.ext import (
     ConversationHandler,
     MessageHandler,
     filters,
-    TypeHandler,
 )
 
 from config import BOT_TOKEN, PORT, STARTUP_CHECKS, WEBHOOK_SECRET, validate_config
@@ -178,11 +177,6 @@ async def sync_telegram_user(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
 
 
-async def sync_every_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sincronizza il profilo su comandi, messaggi e pulsanti senza bloccare gli handler."""
-    await sync_telegram_user(update, context)
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     with start_flow("start"):
         context.user_data.pop("profile_form", None)
@@ -201,7 +195,6 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if query is None:
         return
     await query.answer()
-    await sync_telegram_user(update, context)
     await query.edit_message_text(
         get_home_text(),
         reply_markup=get_home_keyboard(query.from_user.id),
@@ -375,7 +368,6 @@ async def post_init(application: Application) -> None:
 
 
 def register_handlers(application: Application) -> None:
-    application.add_handler(TypeHandler(Update, sync_every_update), group=-1)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("spedizioni", show_shipping_history_user))
