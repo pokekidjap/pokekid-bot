@@ -1,14 +1,9 @@
-Libreria
-/
-admin_orders.py
-
-
 from collections import defaultdict
 
 from services.sheets import get_sheet_records, normalize_username, parse_quantity
 
 
-STATUS_ORDER = {
+MANAGED_STATUS_ORDER = {
     "IN MAGAZZINO": 0,
     "GRADING": 1,
     "RESTAURO": 2,
@@ -17,16 +12,24 @@ STATUS_ORDER = {
 
 
 def get_orders_grouped_by_user() -> list[dict]:
+    """Raggruppa per utente tutti gli articoli ancora da gestire.
+
+    Gli articoli con stato EVASO vengono esclusi sia dalla lista sia dai
+    conteggi mostrati nel pannello amministratore.
+    """
     records = get_sheet_records()
-    grouped: dict[str, dict] = defaultdict(lambda: {
-        "username": "",
-        "rows": [],
-        "total_quantity": 0,
-        "ready_quantity": 0,
-        "grading_quantity": 0,
-        "restoration_quantity": 0,
-        "ordered_quantity": 0,
-    })
+    grouped: dict[str, dict] = defaultdict(
+        lambda: {
+            "username": "",
+            "rows": [],
+            "total_quantity": 0,
+            "ready_quantity": 0,
+            "ordered_quantity": 0,
+            "grading_quantity": 0,
+            "restoration_quantity": 0,
+            "other_quantity": 0,
+        }
+    )
 
     for row_number, row in enumerate(records, start=2):
         username = normalize_username(row.get("UTENTI", ""))
@@ -36,7 +39,8 @@ def get_orders_grouped_by_user() -> list[dict]:
         quantity = parse_quantity(row.get("QUANTITA", 0))
         status = str(row.get("STATO", "")).strip().upper()
 
-        # Gli articoli già evasi non interessano nel pannello operativo Admin.
+        # Gli articoli già evasi non sono più operativi e non devono
+        # comparire nel pannello admin né influire sui conteggi.
         if status == "EVASO":
             continue
 
@@ -48,28 +52,30 @@ def get_orders_grouped_by_user() -> list[dict]:
             "status": status,
         }
 
-        user_data = grouped[username]
-        user_data["username"] = username
-        user_data["rows"].append(item)
-        user_data["total_quantity"] += quantity
+        user = grouped[username]
+        user["username"] = username
+        user["rows"].append(item)
+        user["total_quantity"] += quantity
 
         if status == "IN MAGAZZINO":
-            user_data["ready_quantity"] += quantity
-        elif status == "GRADING":
-            user_data["grading_quantity"] += quantity
-        elif status == "RESTAURO":
-            user_data["restoration_quantity"] += quantity
+            user["ready_quantity"] += quantity
         elif status == "ORDINATO":
-            user_data["ordered_quantity"] += quantity
+            user["ordered_quantity"] += quantity
+        elif status == "GRADING":
+            user["grading_quantity"] += quantity
+        elif status == "RESTAURO":
+            user["restoration_quantity"] += quantity
+        else:
+            user["other_quantity"] += quantity
 
     users = []
-    for user_data in grouped.values():
-        user_data["rows"].sort(
+    for user in grouped.values():
+        user["rows"].sort(
             key=lambda order: (
-                STATUS_ORDER.get(order["status"], 99),
+                MANAGED_STATUS_ORDER.get(order["status"], 99),
                 order["name"].casefold(),
             )
         )
-        users.append(user_data)
+        users.append(user)
 
     return sorted(users, key=lambda user: user["username"].casefold())
