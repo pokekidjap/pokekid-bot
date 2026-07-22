@@ -1,5 +1,4 @@
 import logging
-import os
 
 from telegram import Update
 from telegram.ext import (
@@ -7,6 +6,9 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
 )
 
 from config import (
@@ -23,12 +25,30 @@ from modules.orders import (
     show_orders_menu,
 )
 from modules.profile import (
+    PROFILE_ADDRESS,
+    PROFILE_CITY,
+    PROFILE_EMAIL,
+    PROFILE_NAME,
+    PROFILE_PHONE,
+    PROFILE_POSTAL_CODE,
+    PROFILE_PROVINCE,
+    PROFILE_REVIEW,
     ask_profile_delete_confirmation,
+    cancel_profile_form,
+    receive_profile_address,
+    receive_profile_city,
+    receive_profile_email,
+    receive_profile_name,
+    receive_profile_phone,
+    receive_profile_postal_code,
+    receive_profile_province,
     remove_profile,
+    restart_profile_form,
+    save_profile_form,
     show_profile,
-    show_profile_data_form_placeholder,
     show_profile_shipments,
     show_profile_shipping_data,
+    start_profile_form,
 )
 
 
@@ -54,6 +74,11 @@ async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
+    context.user_data.pop(
+        "profile_form",
+        None,
+    )
+
     await update.message.reply_text(
         text=HOME_TEXT,
         reply_markup=home_keyboard(),
@@ -96,8 +121,6 @@ async def handle_button(
         # Profilo
         "menu_profile": show_profile,
         "profile_shipping_data": show_profile_shipping_data,
-        "profile_add_data": show_profile_data_form_placeholder,
-        "profile_edit_data": show_profile_data_form_placeholder,
         "profile_delete_confirm": ask_profile_delete_confirmation,
         "profile_delete": remove_profile,
         "profile_shipments": show_profile_shipments,
@@ -120,6 +143,96 @@ async def handle_button(
     )
 
 
+def build_profile_conversation_handler() -> ConversationHandler:
+    """
+    Crea il modulo guidato per inserire
+    o modificare i dati di spedizione.
+    """
+    return ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(
+                start_profile_form,
+                pattern=(
+                    r"^(profile_add_data|"
+                    r"profile_edit_data)$"
+                ),
+            )
+        ],
+        states={
+            PROFILE_NAME: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    receive_profile_name,
+                )
+            ],
+            PROFILE_EMAIL: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    receive_profile_email,
+                )
+            ],
+            PROFILE_PHONE: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    receive_profile_phone,
+                )
+            ],
+            PROFILE_ADDRESS: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    receive_profile_address,
+                )
+            ],
+            PROFILE_POSTAL_CODE: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    receive_profile_postal_code,
+                )
+            ],
+            PROFILE_CITY: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    receive_profile_city,
+                )
+            ],
+            PROFILE_PROVINCE: [
+                MessageHandler(
+                    filters.TEXT
+                    & ~filters.COMMAND,
+                    receive_profile_province,
+                )
+            ],
+            PROFILE_REVIEW: [
+                CallbackQueryHandler(
+                    save_profile_form,
+                    pattern=r"^profile_form_save$",
+                ),
+                CallbackQueryHandler(
+                    restart_profile_form,
+                    pattern=r"^profile_form_restart$",
+                ),
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(
+                cancel_profile_form,
+                pattern=r"^profile_form_cancel$",
+            ),
+            CommandHandler(
+                "cancel",
+                cancel_profile_form,
+            ),
+        ],
+        allow_reentry=True,
+    )
+
+
 def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError(
@@ -137,6 +250,10 @@ def main() -> None:
             "start",
             start,
         )
+    )
+
+    application.add_handler(
+        build_profile_conversation_handler()
     )
 
     application.add_handler(

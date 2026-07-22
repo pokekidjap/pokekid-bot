@@ -130,3 +130,47 @@ def profile_back_keyboard() -> InlineKeyboardMarkup:
     ]
 
     return InlineKeyboardMarkup(keyboard)
+
+
+def profile_form_cancel_keyboard() -> InlineKeyboardMarkup:
+    """
+    Tastiera mostrata durante l'inserimento dei dati.
+    """
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "❌ Annulla inserimento",
+                callback_data="profile_form_cancel",
+            )
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def profile_form_review_keyboard() -> InlineKeyboardMarkup:
+    """
+    Tastiera del riepilogo finale.
+    """
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "✅ Salva dati",
+                callback_data="profile_form_save",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "✏️ Ricomincia",
+                callback_data="profile_form_restart",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ Annulla",
+                callback_data="profile_form_cancel",
+            )
+        ],
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
