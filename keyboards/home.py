@@ -15,6 +15,12 @@ def home_keyboard() -> InlineKeyboardMarkup:
                 callback_data="menu_grading",
             )
         ],
+        [
+            InlineKeyboardButton(
+                "👤 Profilo",
+                callback_data="menu_profile",
+            )
+        ],
     ]
 
     return InlineKeyboardMarkup(keyboard)

@@ -2,3 +2,4 @@ python-telegram-bot[webhooks]==22.8
 gspread
 google-auth
 python-dotenv
+tzdata

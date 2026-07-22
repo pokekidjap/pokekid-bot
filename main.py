@@ -22,10 +22,21 @@ from modules.orders import (
     show_available_orders,
     show_orders_menu,
 )
+from modules.profile import (
+    ask_profile_delete_confirmation,
+    remove_profile,
+    show_profile,
+    show_profile_data_form_placeholder,
+    show_profile_shipments,
+    show_profile_shipping_data,
+)
 
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format=(
+        "%(asctime)s - %(name)s - "
+        "%(levelname)s - %(message)s"
+    ),
     level=logging.INFO,
 )
 
@@ -71,14 +82,30 @@ async def handle_button(
     await query.answer()
 
     routes = {
+        # Home
         "menu_home": show_home,
+
+        # Ordini
         "menu_orders": show_orders_menu,
         "orders_available": show_available_orders,
         "orders_all": show_all_orders,
+
+        # Grading
         "menu_grading": show_grading,
+
+        # Profilo
+        "menu_profile": show_profile,
+        "profile_shipping_data": show_profile_shipping_data,
+        "profile_add_data": show_profile_data_form_placeholder,
+        "profile_edit_data": show_profile_data_form_placeholder,
+        "profile_delete_confirm": ask_profile_delete_confirmation,
+        "profile_delete": remove_profile,
+        "profile_shipments": show_profile_shipments,
     }
 
-    handler = routes.get(query.data)
+    handler = routes.get(
+        query.data
+    )
 
     if handler is None:
         await query.answer(
@@ -87,17 +114,36 @@ async def handle_button(
         )
         return
 
-    await handler(update, context)
+    await handler(
+        update,
+        context,
+    )
 
 
 def main() -> None:
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN non trovato.")
+        raise RuntimeError(
+            "BOT_TOKEN non trovato."
+        )
 
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(handle_button))
+    application.add_handler(
+        CommandHandler(
+            "start",
+            start,
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_button
+        )
+    )
 
     if KOYEB_PUBLIC_DOMAIN:
         webhook_url = (
@@ -105,7 +151,9 @@ def main() -> None:
             f"{WEBHOOK_SECRET}"
         )
 
-        logger.info("Avvio Pokekid Bot tramite webhook")
+        logger.info(
+            "Avvio Pokekid Bot tramite webhook"
+        )
 
         application.run_webhook(
             listen="0.0.0.0",
@@ -118,7 +166,9 @@ def main() -> None:
         )
 
     else:
-        logger.info("Avvio Pokekid Bot in locale tramite polling")
+        logger.info(
+            "Avvio Pokekid Bot in locale tramite polling"
+        )
 
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,

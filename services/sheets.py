@@ -15,8 +15,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 CREDENTIALS_FILE = BASE_DIR / "credentials.json"
 
 SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets.readonly",
-    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
 ]
 
 
@@ -65,7 +65,7 @@ def get_google_credentials() -> Credentials:
     """
     Recupera le credenziali Google.
 
-    Su Railway/Koyeb:
+    Su Railway:
     usa la variabile GOOGLE_CREDENTIALS_JSON.
 
     Sul PC:
@@ -110,7 +110,7 @@ def get_google_credentials() -> Credentials:
         "Credenziali Google non trovate.\n"
         f"In locale inserisci credentials.json in: "
         f"{CREDENTIALS_FILE}\n"
-        "Su Railway/Koyeb configura la variabile "
+        "Su Railway configura la variabile "
         "GOOGLE_CREDENTIALS_JSON."
     )
 
