@@ -260,6 +260,7 @@ def get_user_orders(
         )
 
         order = {
+            "row_number": row_number,
             "date": str(
                 row.get("DATA", "")
             ).strip(),

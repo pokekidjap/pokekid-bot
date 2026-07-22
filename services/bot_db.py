@@ -8,6 +8,7 @@ from services.sheets import get_google_credentials
 
 
 PROFILE_WORKSHEET_NAME = "PROFILI"
+ADMIN_WORKSHEET_NAME = "ADMIN"
 SHIPPING_WORKSHEET_NAME = "SPEDIZIONI"
 CONFIG_WORKSHEET_NAME = "CONFIG"
 LOG_WORKSHEET_NAME = "LOG"
@@ -136,6 +137,15 @@ def get_profiles_worksheet() -> gspread.Worksheet:
     )
 
 
+def get_admin_worksheet() -> gspread.Worksheet:
+    """
+    Restituisce la scheda ADMIN.
+    """
+    return get_bot_db_worksheet(
+        ADMIN_WORKSHEET_NAME
+    )
+
+
 def get_shipping_worksheet() -> gspread.Worksheet:
     """
     Restituisce la scheda SPEDIZIONI.
@@ -179,6 +189,7 @@ def test_bot_db_connection() -> list[str]:
 
     required_worksheets = {
         PROFILE_WORKSHEET_NAME,
+        ADMIN_WORKSHEET_NAME,
         SHIPPING_WORKSHEET_NAME,
         CONFIG_WORKSHEET_NAME,
         LOG_WORKSHEET_NAME,
@@ -200,6 +211,143 @@ def test_bot_db_connection() -> list[str]:
         )
 
     return worksheet_names
+
+
+def get_admins(
+    active_only: bool = True,
+) -> list[dict]:
+    """
+    Legge il foglio ADMIN.
+
+    Se active_only è True, restituisce solamente
+    gli amministratori con ATTIVO impostato su TRUE.
+    """
+    worksheet = get_admin_worksheet()
+    values = worksheet.get_all_values()
+
+    if len(values) < 2:
+        return []
+
+    headers = [
+        clean_value(header).upper()
+        for header in values[0]
+    ]
+
+    admins = []
+
+    active_values = {
+        "TRUE",
+        "VERO",
+        "SI",
+        "SÌ",
+        "1",
+        "YES",
+    }
+
+    for row_number, row_values in enumerate(
+        values[1:],
+        start=2,
+    ):
+        row = {}
+
+        for index, header in enumerate(headers):
+            if not header:
+                continue
+
+            value = (
+                row_values[index]
+                if index < len(row_values)
+                else ""
+            )
+
+            row[header] = clean_value(value)
+
+        telegram_id = normalize_telegram_id(
+            row.get("TELEGRAM_ID", "")
+        )
+
+        if not telegram_id:
+            continue
+
+        row["TELEGRAM_ID"] = telegram_id
+        row["USERNAME"] = normalize_username(
+            row.get("USERNAME", "")
+        )
+        row["RUOLO"] = clean_value(
+            row.get("RUOLO", "")
+        ).upper()
+        row["ATTIVO"] = clean_value(
+            row.get("ATTIVO", "")
+        ).upper()
+        row["_ROW_NUMBER"] = row_number
+
+        if (
+            active_only
+            and row["ATTIVO"] not in active_values
+        ):
+            continue
+
+        admins.append(row)
+
+    return admins
+
+
+def get_admin(
+    telegram_id: int | str,
+) -> dict | None:
+    """
+    Restituisce i dati di un amministratore attivo
+    tramite Telegram ID, oppure None.
+    """
+    telegram_id = normalize_telegram_id(
+        telegram_id
+    )
+
+    if not telegram_id:
+        return None
+
+    for admin in get_admins(
+        active_only=True
+    ):
+        if (
+            admin.get("TELEGRAM_ID")
+            == telegram_id
+        ):
+            return admin
+
+    return None
+
+
+def is_admin(
+    telegram_id: int | str,
+) -> bool:
+    """
+    Controlla se il Telegram ID appartiene
+    a un amministratore attivo.
+    """
+    return get_admin(
+        telegram_id
+    ) is not None
+
+
+def is_owner(
+    telegram_id: int | str,
+) -> bool:
+    """
+    Controlla se il Telegram ID appartiene
+    a un OWNER attivo.
+    """
+    admin = get_admin(
+        telegram_id
+    )
+
+    if not admin:
+        return False
+
+    return admin.get(
+        "RUOLO",
+        "",
+    ) == "OWNER"
 
 
 def get_profile(
@@ -506,3 +654,677 @@ def write_log(
         row_data,
         value_input_option="USER_ENTERED",
     )
+def get_config_values() -> dict:
+    """
+    Legge il foglio CONFIG e restituisce
+    tutte le configurazioni in un dizionario.
+
+    Accetta intestazioni come:
+    A - CHIAVE | B - VALORE | C - ATTIVO
+    oppure:
+    CHIAVE | VALORE | ATTIVO
+    """
+    worksheet = get_config_worksheet()
+    values = worksheet.get_all_values()
+
+    if len(values) < 2:
+        return {}
+
+    headers = []
+
+    for header in values[0]:
+        normalized_header = clean_value(
+            header
+        ).upper()
+
+        if "-" in normalized_header:
+            normalized_header = normalized_header.split(
+                "-",
+                1,
+            )[1].strip()
+
+        headers.append(
+            normalized_header
+        )
+
+    config = {}
+
+    for row_values in values[1:]:
+        row = {}
+
+        for index, header in enumerate(headers):
+            if not header:
+                continue
+
+            value = (
+                row_values[index]
+                if index < len(row_values)
+                else ""
+            )
+
+            row[header] = clean_value(
+                value
+            )
+
+        key = row.get(
+            "CHIAVE",
+            "",
+        ).upper()
+
+        if not key:
+            continue
+
+        config[key] = {
+            "value": row.get(
+                "VALORE",
+                "",
+            ),
+            "active": row.get(
+                "ATTIVO",
+                "",
+            ),
+        }
+
+    return config
+
+
+def get_active_shipping_methods() -> list[dict]:
+    """
+    Restituisce tutti i corrieri attivi presenti nel CONFIG.
+
+    Esempio:
+    CORRIERE_BRT | 10 | TRUE
+    """
+    config = get_config_values()
+    shipping_methods = []
+
+    for key, item in config.items():
+        if not key.startswith("CORRIERE_"):
+            continue
+
+        active = clean_value(
+            item.get("active", "")
+        ).upper()
+
+        if active not in {
+            "TRUE",
+            "VERO",
+            "SI",
+            "SÌ",
+            "1",
+            "YES",
+        }:
+            continue
+
+        carrier_name = key.replace(
+            "CORRIERE_",
+            "",
+            1,
+        ).strip()
+
+        price_text = clean_value(
+            item.get("value", "")
+        ).replace(",", ".")
+
+        try:
+            price = float(price_text)
+
+        except ValueError:
+            continue
+
+        shipping_methods.append(
+            {
+                "name": carrier_name,
+                "price": price,
+            }
+        )
+
+    return shipping_methods
+
+
+def get_paypal_email() -> str:
+    """
+    Restituisce l'email PayPal configurata.
+    """
+    config = get_config_values()
+
+    paypal_config = config.get(
+        "PAYPAL_EMAIL",
+        {},
+    )
+
+    return clean_value(
+        paypal_config.get("value", "")
+    )
+
+
+def generate_shipping_id() -> str:
+    """
+    Genera un ID spedizione progressivo giornaliero.
+
+    Esempio:
+    SP-20260722-001
+    """
+    worksheet = get_shipping_worksheet()
+    values = worksheet.get_all_values()
+
+    date_prefix = datetime.now(
+        ITALY_TIMEZONE
+    ).strftime(
+        "SP-%Y%m%d"
+    )
+
+    progressive = 1
+
+    if len(values) >= 2:
+        for row_values in values[1:]:
+            if not row_values:
+                continue
+
+            existing_id = clean_value(
+                row_values[0]
+            )
+
+            if not existing_id.startswith(
+                date_prefix
+            ):
+                continue
+
+            try:
+                existing_progressive = int(
+                    existing_id.rsplit(
+                        "-",
+                        1,
+                    )[1]
+                )
+
+                progressive = max(
+                    progressive,
+                    existing_progressive + 1,
+                )
+
+            except (
+                IndexError,
+                ValueError,
+            ):
+                continue
+
+    return (
+        f"{date_prefix}-"
+        f"{progressive:03d}"
+    )
+
+
+def create_shipping_request(
+    telegram_id: int | str,
+    username: str | None,
+    products: str,
+    carrier: str,
+    shipping_cost: float,
+    payment_file_id: str,
+    profile: dict,
+    notes: str = "",
+) -> dict:
+    """
+    Crea una nuova richiesta di spedizione.
+    """
+    telegram_id = normalize_telegram_id(
+        telegram_id
+    )
+
+    username = normalize_username(
+        username
+    )
+
+    products = clean_value(
+        products
+    )
+
+    carrier = clean_value(
+        carrier
+    ).upper()
+
+    payment_file_id = clean_value(
+        payment_file_id
+    )
+
+    notes = clean_value(
+        notes
+    )
+
+    if not telegram_id:
+        raise ValueError(
+            "Telegram ID mancante."
+        )
+
+    if not products:
+        raise ValueError(
+            "Prodotti mancanti."
+        )
+
+    if not carrier:
+        raise ValueError(
+            "Corriere mancante."
+        )
+
+    if not payment_file_id:
+        raise ValueError(
+            "Allegato pagamento mancante."
+        )
+
+    required_profile_fields = {
+        "NOME",
+        "EMAIL",
+        "TELEFONO",
+        "INDIRIZZO",
+        "CAP",
+        "CITTA",
+        "PROVINCIA",
+    }
+
+    missing_fields = [
+        field
+        for field in required_profile_fields
+        if not clean_value(
+            profile.get(field, "")
+        )
+    ]
+
+    if missing_fields:
+        raise ValueError(
+            "Profilo incompleto. Campi mancanti: "
+            + ", ".join(
+                sorted(missing_fields)
+            )
+        )
+
+    shipping_id = generate_shipping_id()
+    current_datetime = get_current_datetime()
+
+    row_data = [
+        shipping_id,
+        current_datetime,
+        telegram_id,
+        username,
+        products,
+        "IN_ATTESA",
+        carrier,
+        "",
+        payment_file_id,
+        notes,
+        "",
+        current_datetime,
+        "",
+        clean_value(
+            profile.get("NOME", "")
+        ),
+        clean_value(
+            profile.get("EMAIL", "")
+        ),
+        clean_value(
+            profile.get("TELEFONO", "")
+        ),
+        clean_value(
+            profile.get("INDIRIZZO", "")
+        ),
+        clean_value(
+            profile.get("CAP", "")
+        ),
+        clean_value(
+            profile.get("CITTA", "")
+        ),
+        clean_value(
+            profile.get("PROVINCIA", "")
+        ).upper(),
+        shipping_cost,
+    ]
+
+    worksheet = get_shipping_worksheet()
+
+    worksheet.append_row(
+        row_data,
+        value_input_option="USER_ENTERED",
+    )
+
+    write_log(
+        telegram_id=telegram_id,
+        username=username,
+        action="RICHIESTA_SPEDIZIONE_CREATA",
+        details=(
+            f"Richiesta {shipping_id} creata "
+            f"con corriere {carrier}."
+        ),
+    )
+
+    return {
+        "ID": shipping_id,
+        "DATA": current_datetime,
+        "TELEGRAM_ID": telegram_id,
+        "USERNAME": username,
+        "PRODOTTI": products,
+        "STATO": "IN_ATTESA",
+        "CORRIERE": carrier,
+        "TRACKING": "",
+        "PAYMENT_FILE_ID": payment_file_id,
+        "NOTE": notes,
+        "DATA_SPEDIZIONE": "",
+        "ULTIMO_AGGIORNAMENTO": current_datetime,
+        "ADMIN": "",
+        "NOME": clean_value(
+            profile.get("NOME", "")
+        ),
+        "EMAIL": clean_value(
+            profile.get("EMAIL", "")
+        ),
+        "TELEFONO": clean_value(
+            profile.get("TELEFONO", "")
+        ),
+        "INDIRIZZO": clean_value(
+            profile.get("INDIRIZZO", "")
+        ),
+        "CAP": clean_value(
+            profile.get("CAP", "")
+        ),
+        "CITTA": clean_value(
+            profile.get("CITTA", "")
+        ),
+        "PROVINCIA": clean_value(
+            profile.get("PROVINCIA", "")
+        ).upper(),
+        "COSTO_SPEDIZIONE": shipping_cost,
+    }
+
+
+def get_user_shipping_requests(
+    telegram_id: int | str,
+) -> list[dict]:
+    """
+    Restituisce tutte le spedizioni associate
+    a un Telegram ID.
+    """
+    telegram_id = normalize_telegram_id(
+        telegram_id
+    )
+
+    if not telegram_id:
+        return []
+
+    worksheet = get_shipping_worksheet()
+    values = worksheet.get_all_values()
+
+    if len(values) < 2:
+        return []
+
+    headers = [
+        clean_value(header).upper()
+        for header in values[0]
+    ]
+
+    shipping_requests = []
+
+    for row_number, row_values in enumerate(
+        values[1:],
+        start=2,
+    ):
+        row = {}
+
+        for index, header in enumerate(headers):
+            if not header:
+                continue
+
+            value = (
+                row_values[index]
+                if index < len(row_values)
+                else ""
+            )
+
+            row[header] = clean_value(value)
+
+        if row.get("TELEGRAM_ID") != telegram_id:
+            continue
+
+        row["_ROW_NUMBER"] = row_number
+        shipping_requests.append(row)
+
+    shipping_requests.reverse()
+
+    return shipping_requests
+
+def get_all_shipping_requests(
+    statuses: set[str] | None = None,
+) -> list[dict]:
+    """
+    Restituisce tutte le richieste di spedizione.
+
+    Se statuses è valorizzato, restituisce solamente
+    le richieste con uno degli stati indicati.
+    """
+    worksheet = get_shipping_worksheet()
+    values = worksheet.get_all_values()
+
+    if len(values) < 2:
+        return []
+
+    headers = [
+        clean_value(header).upper()
+        for header in values[0]
+    ]
+
+    normalized_statuses = None
+
+    if statuses is not None:
+        normalized_statuses = {
+            clean_value(status).upper()
+            for status in statuses
+            if clean_value(status)
+        }
+
+    shipping_requests = []
+
+    for row_number, row_values in enumerate(
+        values[1:],
+        start=2,
+    ):
+        row = {}
+
+        for index, header in enumerate(headers):
+            if not header:
+                continue
+
+            value = (
+                row_values[index]
+                if index < len(row_values)
+                else ""
+            )
+
+            row[header] = clean_value(value)
+
+        if not row.get("ID"):
+            continue
+
+        status = clean_value(
+            row.get("STATO", "")
+        ).upper()
+
+        if (
+            normalized_statuses is not None
+            and status not in normalized_statuses
+        ):
+            continue
+
+        row["_ROW_NUMBER"] = row_number
+        shipping_requests.append(row)
+
+    shipping_requests.reverse()
+
+    return shipping_requests
+
+
+def get_shipping_request(
+    shipping_id: str,
+) -> dict | None:
+    """
+    Cerca una richiesta tramite il relativo ID.
+    """
+    shipping_id = clean_value(
+        shipping_id
+    ).upper()
+
+    if not shipping_id:
+        return None
+
+    for shipping_request in get_all_shipping_requests():
+        if (
+            clean_value(
+                shipping_request.get("ID", "")
+            ).upper()
+            == shipping_id
+        ):
+            return shipping_request
+
+    return None
+
+
+def complete_shipping_request(
+    shipping_id: str,
+    tracking: str,
+    admin: str,
+) -> dict:
+    """
+    Salva il tracking e imposta la richiesta come SPEDITO.
+    """
+    shipping_id = clean_value(
+        shipping_id
+    ).upper()
+
+    tracking = clean_value(
+        tracking
+    )
+
+    admin = clean_value(
+        admin
+    )
+
+    if not shipping_id:
+        raise ValueError(
+            "ID richiesta mancante."
+        )
+
+    if not tracking:
+        raise ValueError(
+            "Tracking mancante."
+        )
+
+    existing_request = get_shipping_request(
+        shipping_id
+    )
+
+    if not existing_request:
+        raise ValueError(
+            "Richiesta di spedizione non trovata."
+        )
+
+    row_number = existing_request[
+        "_ROW_NUMBER"
+    ]
+
+    current_datetime = get_current_datetime()
+
+    # Colonne F:M:
+    # STATO, CORRIERE, TRACKING, PAYMENT_FILE_ID,
+    # NOTE, DATA_SPEDIZIONE, ULTIMO_AGGIORNAMENTO, ADMIN
+    updated_values = [[
+        "SPEDITO",
+        existing_request.get("CORRIERE", ""),
+        tracking,
+        existing_request.get("PAYMENT_FILE_ID", ""),
+        existing_request.get("NOTE", ""),
+        current_datetime,
+        current_datetime,
+        admin,
+    ]]
+
+    worksheet = get_shipping_worksheet()
+
+    worksheet.update(
+        range_name=(
+            f"F{row_number}:M{row_number}"
+        ),
+        values=updated_values,
+        value_input_option="USER_ENTERED",
+    )
+
+    write_log(
+        telegram_id=existing_request.get(
+            "TELEGRAM_ID",
+            "",
+        ),
+        username=existing_request.get(
+            "USERNAME",
+            "",
+        ),
+        action="SPEDIZIONE_COMPLETATA",
+        details=(
+            f"Richiesta {shipping_id} impostata come "
+            f"SPEDITO. Tracking: {tracking}."
+        ),
+        admin=admin,
+    )
+
+    existing_request.update(
+        {
+            "STATO": "SPEDITO",
+            "TRACKING": tracking,
+            "DATA_SPEDIZIONE": current_datetime,
+            "ULTIMO_AGGIORNAMENTO": current_datetime,
+            "ADMIN": admin,
+        }
+    )
+
+    return existing_request
+
+
+def set_config_value(key: str, value: str, active: str | bool | None = None) -> None:
+    key = clean_value(key).upper()
+    worksheet = get_config_worksheet()
+    values = worksheet.get_all_values()
+    if not values:
+        worksheet.append_row(["A - CHIAVE", "B - VALORE", "C - ATTIVO"])
+        values = worksheet.get_all_values()
+
+    for row_number, row in enumerate(values[1:], start=2):
+        current_key = clean_value(row[0] if row else "").upper()
+        if current_key == key:
+            current_active = row[2] if len(row) > 2 else ""
+            final_active = current_active if active is None else ("TRUE" if active is True else "FALSE" if active is False else clean_value(active))
+            worksheet.update(range_name=f"A{row_number}:C{row_number}", values=[[key, clean_value(value), final_active]])
+            return
+
+    final_active = "" if active is None else ("TRUE" if active is True else "FALSE" if active is False else clean_value(active))
+    worksheet.append_row([key, clean_value(value), final_active], value_input_option="USER_ENTERED")
+
+
+def is_sorting_active() -> bool:
+    item = get_config_values().get("SMISTAMENTO", {})
+    value = clean_value(item.get("value", "")).upper()
+    active = clean_value(item.get("active", "")).upper()
+    return value in {"TRUE", "VERO", "SI", "SÌ", "1", "YES"} or active in {"TRUE", "VERO", "SI", "SÌ", "1", "YES"}
+
+
+def set_sorting_status(active: bool, admin: str = "") -> None:
+    set_config_value("SMISTAMENTO", "TRUE" if active else "FALSE")
+    write_log(action="SMISTAMENTO_AVVIATO" if active else "SMISTAMENTO_COMPLETATO", details="Stato smistamento aggiornato dal pannello admin.", admin=admin)
+
+
+def get_bot_status() -> dict:
+    profiles = get_profiles_worksheet().get_all_values()
+    shipments = get_all_shipping_requests()
+    config = get_config_values()
+    return {
+        "profiles": max(len(profiles) - 1, 0),
+        "admins": len(get_admins()),
+        "shipping_pending": sum(1 for x in shipments if x.get("STATO") == "IN_ATTESA"),
+        "shipping_sent": sum(1 for x in shipments if x.get("STATO") == "SPEDITO"),
+        "sorting": is_sorting_active(),
+        "version": clean_value(config.get("VERSIONE_BOT", {}).get("value", "1.3")) or "1.3",
+    }
