@@ -74,7 +74,7 @@ async def show_orders_by_user(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     context.user_data["admin_order_users"] = users
     await query.edit_message_text(
-        f"👥 <b>Ordini per utente</b>\n\nUtenti trovati: <b>{len(users)}</b>\n🟢 = prodotti pronti / totale",
+        f"👥 <b>Ordini per utente</b>\n\nUtenti trovati: <b>{len(users)}</b>\n🟢 = in magazzino / da gestire\nGli articoli EVASO sono esclusi.",
         reply_markup=admin_users_keyboard(users), parse_mode="HTML",
     )
 
@@ -90,15 +90,44 @@ async def show_user_orders_detail(update: Update, context: ContextTypes.DEFAULT_
     except (ValueError, IndexError):
         await query.answer("Elenco scaduto: aggiorna.", show_alert=True)
         return
+    status_icons = {
+        "IN MAGAZZINO": "🟢",
+        "GRADING": "🔵",
+        "RESTAURO": "🟣",
+        "ORDINATO": "🟡",
+    }
+
     lines = []
+    previous_status = None
+
     for order in user["rows"]:
-        icon = "🟢" if order["status"] == "IN MAGAZZINO" else "🟡"
-        lines.append(f"{icon} <b>{escape(order['name'])}</b> ×{order['quantity']}\n   {escape(order['status'] or 'SENZA STATO')}")
-    text = (
+        status = order["status"] or "SENZA STATO"
+
+        if previous_status is not None and status != previous_status:
+            lines.append("━━━━━━━━━━━━━━")
+
+        icon = status_icons.get(status, "⚪")
+        lines.append(
+            f"{icon} <b>{escape(order['name'])}</b> ×{order['quantity']}\n"
+            f"   {escape(status)}"
+        )
+        previous_status = status
+
+    header = (
         f"👤 <b>{escape(user['username'])}</b>\n\n"
-        f"📦 Totale: <b>{user['total_quantity']}</b>\n"
-        f"🟢 Pronti: <b>{user['ready_quantity']}</b>\n\n" + "\n\n".join(lines[:80])
+        f"📦 Da gestire: <b>{user['total_quantity']}</b>\n\n"
+        f"🟢 In magazzino: <b>{user['ready_quantity']}</b>\n"
+        f"🔵 Grading: <b>{user.get('grading_quantity', 0)}</b>\n"
+        f"🟣 Restauro: <b>{user.get('restoration_quantity', 0)}</b>\n"
+        f"🟡 Ordinati: <b>{user.get('ordered_quantity', 0)}</b>"
     )
+
+    body = "\n\n".join(lines)
+    text = f"{header}\n\n{body}" if body else f"{header}\n\nNessun articolo da gestire."
+
+    # Telegram accetta al massimo 4096 caratteri per messaggio.
+    if len(text) > 4000:
+        text = text[:3950].rsplit("\n\n", 1)[0] + "\n\n… Elenco abbreviato."
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[
         InlineKeyboardButton("⬅️ Utenti", callback_data="admin_orders_users")
