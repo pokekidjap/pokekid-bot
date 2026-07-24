@@ -333,7 +333,7 @@ def v2_available_orders_keyboard(
     if navigation:
         keyboard.append(navigation)
 
-    if available_items:
+    if selected_item_ids:
         keyboard.append([
             InlineKeyboardButton(
                 "📦 Continua con la spedizione",

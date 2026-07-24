@@ -1,7 +1,7 @@
 # Report di analisi — POKEKID BOT 2.0.0
 
-Data revisione: 23/07/2026
-Ambito: archivio `POKEKID_BOT_con_documentazione.zip`
+Data revisione: 23/07/2026  
+Ambito: archivio `POKEKID_BOT_con_documentazione.zip`  
 Vincolo rispettato: nessun file Python modificato
 
 > Nota successiva: questo report fotografa lo stato precedente alla prima
@@ -202,22 +202,22 @@ quando la finestra scorre può conteggiare in modo impreciso i non letti.
 
 ### Critici
 
-1. **Flusso ricevuta interrotto da `NameError`.**
+1. **Flusso ricevuta interrotto da `NameError`.**  
    `modules/shipping.py:197` e `modules/shipping.py:260` usano
    `start_flow`, che non è importato. Il primo click su
    `shipping_payment` non può completarsi.
 
-2. **Nessuna prenotazione o deduplicazione degli articoli.**
+2. **Nessuna prenotazione o deduplicazione degli articoli.**  
    `create_shipping_request()` scrive soltanto `SPEDIZIONI` e `LOG`.
    Le righe `ORDINI` restano `IN MAGAZZINO`, quindi lo stesso utente può
    selezionarle nuovamente e il codice non impedisce richieste duplicate.
 
-3. **Selezione basata su dati e numeri di riga non ricontrollati.**
+3. **Selezione basata su dati e numeri di riga non ricontrollati.**  
    Se il foglio cambia tra selezione e ricevuta, la richiesta usa lo snapshot
    in memoria. Inserimenti, cancellazioni o cambi di stato non vengono
    rilevati.
 
-4. **Profilo minimo confuso con profilo completo.**
+4. **Profilo minimo confuso con profilo completo.**  
    `services/profiles.py:33` crea la riga minima;
    `modules/profile.py:218` e `modules/orders.py:369` controllano
    essenzialmente solo l'esistenza della riga. L'utente può arrivare al
@@ -225,61 +225,61 @@ quando la finestra scorre può conteggiare in modo impreciso i non letti.
 
 ### Alti
 
-5. **Cache profilo non invalidata dopo salvataggio.**
+5. **Cache profilo non invalidata dopo salvataggio.**  
    `services/bot_db.py:420-570` aggiorna o aggiunge il profilo senza
    `invalidate("profiles")`. I dati precedenti possono restare visibili per
    60 secondi e interferire con una spedizione immediata.
 
-6. **Race durante lo smistamento.**
+6. **Race durante lo smistamento.**  
    `is_sorting_active()` viene controllato in
    `start_shipping_payment()`, ma non in `receive_shipping_receipt()`. Uno
    smistamento iniziato nel frattempo non blocca la creazione.
 
-7. **Progressivo spedizione non atomico.**
+7. **Progressivo spedizione non atomico.**  
    Due richieste concorrenti possono leggere lo stesso massimo e generare lo
    stesso ID prima delle rispettive `append_row`.
 
-8. **Chiamate sincrone a Google Sheets nell'event loop.**
+8. **Chiamate sincrone a Google Sheets nell'event loop.**  
    Diversi handler ordini, grading, storico, admin, spedizione e notifiche
    chiamano direttamente funzioni `gspread`. In caso di latenza il bot può
    smettere temporaneamente di elaborare altri update.
 
-9. **Callback refresh grading non raggiungibile.**
+9. **Callback refresh grading non raggiungibile.**  
    La tastiera crea `grading_refresh`, ma il normale percorso la porta a
    “Funzione non riconosciuta”.
 
 ### Medi
 
-10. **Sette funzioni grading definite due volte.**
+10. **Sette funzioni grading definite due volte.**  
     Il blocco tra `modules/grading.py:243` e `modules/grading.py:703` è
     duplicato. Le seconde definizioni sostituiscono le prime.
 
-11. **Scritture Google dipendenti dalla posizione delle colonne.**
+11. **Scritture Google dipendenti dalla posizione delle colonne.**  
     Il codice legge per intestazione ma scrive intervalli fissi, senza
     validare lo schema completo all'avvio.
 
-12. **Semantica `/cancel` incoerente con il comando pubblicato.**
+12. **Semantica `/cancel` incoerente con il comando pubblicato.**  
     È disponibile soltanto durante la conversazione profilo.
 
-13. **Contatore notifiche admin fragile.**
+13. **Contatore notifiche admin fragile.**  
     Il numero di eventi negli ultimi 50 log non è un cursore stabile. Inoltre
     `mark_admin_notifications_read()` risponde alla callback e poi richiama
     una funzione che prova a rispondere di nuovo.
 
-14. **Stato servizi troppo ottimistico.**
+14. **Stato servizi troppo ottimistico.**  
     La schermata admin può mostrare “Google Sheets” verde dopo letture del
     solo BOT DB; non verifica necessariamente `ORDINI` e `GRADING`.
 
-15. **Pulizia incompleta della sessione spedizione.**
+15. **Pulizia incompleta della sessione spedizione.**  
     `shipping_selection_timestamp` non viene rimosso da nessuna delle due
     funzioni di pulizia.
 
-16. **Autorizzazioni admin senza distinzione di ruolo.**
+16. **Autorizzazioni admin senza distinzione di ruolo.**  
     `is_owner()` esiste ma non è usato: ogni admin attivo può smistare,
     modificare messaggi e inviare broadcast. Va confermato se sia il modello
     autorizzativo desiderato.
 
-17. **Cancellazione profilo e conservazione PII non esplicitate.**
+17. **Cancellazione profilo e conservazione PII non esplicitate.**  
     La cancellazione non rimuove i dati copiati in `SPEDIZIONI`. Serve una
     policy documentata di conservazione, anonimizzazione o obbligo legale.
 

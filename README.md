@@ -143,7 +143,14 @@ La hotfix prestazionale v2.3.1 evita la riscrittura dell'intero registro
 quando i dati non cambiano, riduce le letture duplicate durante apertura e
 refresh e rende toggle/paginazione completamente locali. La versione mostrata
 dal bot viene caricata da `CONFIG -> VERSIONE_BOT` durante lo startup e poi
-letta dalla memoria; il fallback locale è `2.3.1`.
+letta dalla memoria.
+
+La hotfix v2.3.2 forza una nuova sincronizzazione quando `Continua con la
+spedizione` incontra un conflitto, elimina dalla selezione gli articoli non
+più disponibili e mostra il pulsante Continua solo se la selezione non è
+vuota. Le callback scadute e gli edit senza modifiche sono gestiti nei soli
+casi Telegram previsti. I log HTTP non espongono il token del bot. Il
+fallback locale della versione è `2.3.2`.
 
 ## Struttura
 

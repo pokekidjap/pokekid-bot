@@ -4,7 +4,7 @@ from __future__ import annotations
 from threading import RLock
 from typing import Any, Callable
 
-BOT_VERSION_FALLBACK = "2.3.1"
+BOT_VERSION_FALLBACK = "2.3.2"
 
 _LOCK = RLock()
 _loaded_version = BOT_VERSION_FALLBACK

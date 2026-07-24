@@ -2,6 +2,44 @@
 
 Tutte le modifiche rilevanti del progetto devono essere annotate qui.
 
+## [Hotfix v2.3.2 — Conflitti disponibilità e sicurezza log] — 24/07/2026
+
+### Corretto
+- dopo un `ReservationConflictError` nel callback
+  `shipping_v2_continue`, lo stato viene ricostruito con
+  `force_refresh=True` e non può riutilizzare lo snapshot che aveva mostrato
+  gli articoli prima del conflitto;
+- la selezione locale conserva soltanto gli ID ancora presenti nel nuovo
+  stato autorevole; il pulsante `Continua con la spedizione` compare soltanto
+  quando esiste almeno un articolo selezionato;
+- il messaggio di conflitto indica esplicitamente:
+  `La disponibilità è cambiata. Seleziona nuovamente gli articoli disponibili.`;
+- la callback di continuazione viene confermata una sola volta prima delle
+  operazioni remote; il solo `BadRequest` per query scaduta viene assorbito,
+  mentre gli altri errori continuano a essere propagati o trattati come
+  errori reali;
+- gli edit Telegram ignorano in sicurezza il solo
+  `Message is not modified`.
+
+### Diagnostica e sicurezza
+- i conflitti di prenotazione registrano, per ogni ID articolo, gli esiti di
+  `IS_ACTIVE`, `SYNC_STATUS`, `STATO_ORIGINE`, corrispondenza del
+  `TELEGRAM_ID_PROPRIETARIO` e presenza di prenotazioni attive, senza
+  registrare l'ID proprietario;
+- i logger `httpx` e `httpcore` sono limitati almeno a `WARNING`; un filtro
+  redige inoltre qualsiasi token presente in URL Telegram prima dell'output;
+- il fallback locale della versione è `2.3.2`;
+- aggiunti test isolati per cache obsoleta, refresh autorevole, selezione,
+  tastiera, callback scadute, `BadRequest`, edit identici, diagnostica
+  articolo e redazione token.
+
+### Invariato
+- nessuna migrazione o modifica agli schemi Google Sheets;
+- `Gestione vendite gruppo`, inclusa `ORDINI`, resta completamente in sola
+  lettura;
+- callback data, flusso legacy, lock e compatibilità a replica singola
+  restano invariati.
+
 ## [Performance Hotfix v2.3.1 — Articoli disponibili e versione bot] — 24/07/2026
 
 ### Corretto

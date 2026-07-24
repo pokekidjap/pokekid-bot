@@ -406,6 +406,113 @@ def _list_available_from_repository(
     ]
 
 
+def inspect_v2_item_availability(
+    holder_id: int | str,
+    item_ids: Iterable[str],
+    *,
+    reservations_repository: ReservationsRepository | None = None,
+    now: datetime | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Restituisce i soli predicati tecnici di disponibilità, senza PII."""
+    repository = reservations_repository or ReservationsRepository()
+    current = _aware_now(now)
+    holder = normalize_telegram_id(holder_id)
+    selected = list(
+        dict.fromkeys(
+            clean_value(item_id).upper()
+            for item_id in item_ids
+            if clean_value(item_id)
+        )
+    )
+    with repository._session_factory(
+        repository.spreadsheet_id,
+        repository.registry_sheet,
+    ) as session:
+        _, registry = _read_expected(
+            session,
+            ORDER_REGISTRY_HEADERS,
+            "ORDINI_ARTICOLI",
+        )
+    by_id = {
+        record["ID_ARTICOLO"].upper(): record
+        for record in registry
+        if record["ID_ARTICOLO"]
+    }
+    occupied = repository.get_active_reservations(
+        selected,
+        now=current,
+    )
+    result: dict[str, dict[str, Any]] = {}
+    for item_id in selected:
+        item = by_id.get(item_id)
+        is_active = (
+            clean_value(item.get("IS_ACTIVE", "")).upper()
+            if item
+            else ""
+        )
+        sync_status = (
+            clean_value(item.get("SYNC_STATUS", "")).upper()
+            if item
+            else ""
+        )
+        source_status = (
+            clean_value(item.get("STATO_ORIGINE", "")).upper()
+            if item
+            else ""
+        )
+        owner_matches = bool(
+            item
+            and clean_value(
+                item.get("TELEGRAM_ID_PROPRIETARIO", "")
+            )
+            == holder
+        )
+        active_reservation = item_id in occupied
+        reasons = []
+        if item is None:
+            reasons.append("ID_ASSENTE")
+        if is_active != "TRUE":
+            reasons.append("IS_ACTIVE")
+        if sync_status not in RESERVABLE_SYNC_STATUSES:
+            reasons.append("SYNC_STATUS")
+        if source_status != "IN MAGAZZINO":
+            reasons.append("STATO_ORIGINE")
+        if not owner_matches:
+            reasons.append("TELEGRAM_ID_PROPRIETARIO")
+        if active_reservation:
+            reasons.append("PRENOTAZIONE_ATTIVA")
+        result[item_id] = {
+            "available": not reasons,
+            "IS_ACTIVE": is_active,
+            "SYNC_STATUS": sync_status,
+            "STATO_ORIGINE": source_status,
+            "TELEGRAM_ID_PROPRIETARIO_MATCH": owner_matches,
+            "PRENOTAZIONE_ATTIVA": active_reservation,
+            "reasons": reasons,
+        }
+    return result
+
+
+def _log_v2_availability_conflict(
+    diagnostics: dict[str, dict[str, Any]],
+) -> None:
+    for item_id, detail in diagnostics.items():
+        reasons = detail["reasons"] or ["CONFLITTO_REPOSITORY"]
+        logger.warning(
+            "Shipping v2 conflitto disponibilità: id_articolo=%s "
+            "is_active=%s sync_status=%s stato_origine=%s "
+            "telegram_id_proprietario_match=%s prenotazione_attiva=%s "
+            "motivi=%s",
+            item_id,
+            detail["IS_ACTIVE"],
+            detail["SYNC_STATUS"],
+            detail["STATO_ORIGINE"],
+            detail["TELEGRAM_ID_PROPRIETARIO_MATCH"],
+            detail["PRENOTAZIONE_ATTIVA"],
+            ",".join(reasons),
+        )
+
+
 def list_v2_available_items(
     holder_id: int | str,
     *,
@@ -651,27 +758,48 @@ def reserve_v2_items(
         for item_id in item_ids
         if clean_value(item_id)
     ]
-    available = {
-        item["ID_ARTICOLO"]
-        for item in _list_available_from_repository(
-            holder_id,
-            repository,
-            now=current,
-        )
-    }
-    unavailable = [item_id for item_id in selected if item_id not in available]
+    diagnostics = inspect_v2_item_availability(
+        holder_id,
+        selected,
+        reservations_repository=repository,
+        now=current,
+    )
+    unavailable = [
+        item_id
+        for item_id in selected
+        if not diagnostics[item_id]["available"]
+    ]
     if unavailable:
+        _log_v2_availability_conflict(
+            {
+                item_id: diagnostics[item_id]
+                for item_id in unavailable
+            }
+        )
         raise ReservationConflictError(
             "Articoli non più disponibili: " + ", ".join(unavailable)
         )
-    return repository.reserve_items(
-        telegram_id=holder_id,
-        username=username,
-        item_ids=selected,
-        idempotency_key=idempotency_key,
-        authorized_contributor_item_ids=set(),
-        now=current,
-    )
+    try:
+        return repository.reserve_items(
+            telegram_id=holder_id,
+            username=username,
+            item_ids=selected,
+            idempotency_key=idempotency_key,
+            authorized_contributor_item_ids=set(),
+            now=current,
+        )
+    except ReservationConflictError:
+        # Il repository rivalida sotto lock: un conflitto qui segnala una
+        # variazione intercorsa dopo il controllo precedente.
+        _log_v2_availability_conflict(
+            inspect_v2_item_availability(
+                holder_id,
+                selected,
+                reservations_repository=repository,
+                now=current,
+            )
+        )
+        raise
 
 
 def _products_from_snapshots(records: list[dict[str, str]]) -> str:

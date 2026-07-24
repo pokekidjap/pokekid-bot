@@ -120,12 +120,14 @@ from services.bot_db import get_admins, get_config_values, is_admin
 from services.profiles import sync_basic_profile
 from services.startup import run_startup_checks
 from services.bot_version import get_bot_version, load_bot_version
+from services.logging_security import configure_http_logging_security
 from services.ui import LAST_UPDATE, compact_error, with_footer
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+configure_http_logging_security()
 logger = logging.getLogger(__name__)
 
 HOME_BODY = (

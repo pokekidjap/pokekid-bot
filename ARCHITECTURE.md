@@ -209,7 +209,7 @@ remote di `ORDINI`, `GRADING` e BOT DB usano tutte il retry centralizzato.
 `services/bot_version.py` separa il caricamento dalla lettura.
 `load_bot_version()` consulta `CONFIG -> VERSIONE_BOT` una sola volta in
 `post_init()`, dopo i controlli Google opzionali e tramite
-`asyncio.to_thread()`. Un valore assente o un errore usa il fallback `2.3.1`.
+`asyncio.to_thread()`. Un valore assente o un errore usa il fallback `2.3.2`.
 `get_bot_version()` restituisce esclusivamente il valore in memoria:
 `with_footer()`, toggle e paginazione non eseguono accessi Google. Un cambio
 in `CONFIG` diventa visibile al riavvio o dopo un richiamo esplicito del
@@ -409,6 +409,27 @@ per ricostruire bozze e occupazioni correnti. `orders_refresh` usa sempre
 `context.user_data`. Continua, pagamento e finalizzazione non usano questo
 snapshot come autorità e mantengono la rivalidazione completa sotto i lock
 previsti.
+
+La hotfix v2.3.2 rende esplicita anche la riconciliazione dopo un conflitto
+in Continua. `continue_v2_shipping()` conferma subito la callback una sola
+volta, quindi, se `reserve_v2_items()` segnala
+`ReservationConflictError`, richiama
+`prepare_v2_opening_state(..., force_refresh=True)`. Il nuovo elenco
+interseca gli ID selezionati con quelli ancora disponibili; la tastiera
+mostra `shipping_v2_continue` soltanto quando l'intersezione non è vuota.
+Il percorso non aggiunge timestamp artificiali: `Message is not modified`
+viene ignorato, mentre gli altri `BadRequest` restano errori reali. Per
+callback già scadute viene assorbito esclusivamente il testo Telegram
+`Query is too old and response timeout expired or query id is invalid`.
+
+Prima della prenotazione, la diagnostica di disponibilità applica per ogni
+ID gli stessi predicati autorevoli: `IS_ACTIVE=TRUE`,
+`SYNC_STATUS in {OK, MODIFICATO}`, `STATO_ORIGINE=IN MAGAZZINO`,
+proprietario uguale al titolare e assenza di una prenotazione occupante in
+`SPEDIZIONI_ARTICOLI`. I log riportano gli esiti booleani e gli stati, non
+il Telegram ID del proprietario. Il gestionale sorgente resta in sola
+lettura: sincronizzazione e diagnostica scrivono esclusivamente nel
+DATABASE BOT secondo i confini già definiti.
 
 Annulla, Cambia articoli, annullamento ricevuta e `/cancel` rilasciano
 idempotentemente la bozza `PRENOTATO`. Il contesto viene cancellato solo
@@ -616,6 +637,12 @@ marcati come letti per ciascun amministratore.
 Le chiamate Telegram sono asincrone. I flussi applicativi spostano le
 operazioni sincrone Google in `asyncio.to_thread()`; nel thread, il runtime
 condiviso coordina accesso, retry e misurazioni.
+
+`services/logging_security.py`, configurato nello startup dopo
+`logging.basicConfig()`, imposta `httpx` e `httpcore` almeno a `WARNING` e
+redige il segmento sensibile degli URL `api.telegram.org/bot...` anche
+prima dell'emissione degli handler root. Il token del bot non deve quindi
+comparire nei log HTTP, nemmeno in un record a livello warning o superiore.
 
 ## Confini delle responsabilità
 - `modules/`: gestione Update/Context e testi del flusso;

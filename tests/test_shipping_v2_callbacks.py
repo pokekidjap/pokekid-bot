@@ -159,29 +159,31 @@ class ShippingV2CallbackAuditTests(unittest.TestCase):
                     )
                     or (
                         isinstance(node.func, ast.Name)
-                        and node.func.id == "_require_v2"
+                        and node.func.id
+                        in {"_require_v2", "_answer_query"}
                     )
                 )
             ]
             # _require_v2 risponde solo nel ramo feature-off; il ramo attivo
-            # contiene una singola query.answer().
-            direct_answers = [
+            # contiene una sola conferma, diretta o tramite _answer_query.
+            active_answers = [
                 node
                 for node in calls
-                if isinstance(node.func, ast.Attribute)
-                and node.func.attr == "answer"
-            ]
-            if name in {
-                "cancel_v2_shipping_receipt",
-            }:
-                self.assertEqual(len(direct_answers), 1)
-            else:
-                expected_answers = (
-                    2 if name == "continue_v2_shipping" else 1
+                if (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "answer"
                 )
+                or (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "_answer_query"
+                )
+            ]
+            if name == "cancel_v2_shipping_receipt":
+                self.assertEqual(len(active_answers), 1)
+            else:
                 self.assertEqual(
-                    len(direct_answers),
-                    expected_answers,
+                    len(active_answers),
+                    1,
                     name,
                 )
                 self.assertTrue(

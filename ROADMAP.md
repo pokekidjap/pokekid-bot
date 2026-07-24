@@ -10,7 +10,7 @@ sottoposti a hardening v2.1.1; integrazione Telegram v2.2 completata per le
 sole spedizioni del singolo titolare e protetta da doppio feature flag;
 hardening operativo v2.2.1 completato.
 Unione semplificata, gestione finale admin e tracking multipartecipante v2.3
-completati.
+completati. Hotfix v2.3.2 dei conflitti di disponibilità completata.
 
 Completato:
 - import corretto di `start_flow` in `modules/shipping.py`;
@@ -52,6 +52,11 @@ Completato:
 - recupero idempotente di append e aggiornamento `PRODOTTI` parziali;
 - dettaglio admin raggruppato per proprietario, tracking a tutti gli ID
   unici e annullamento amministrativo dell'intera richiesta.
+- refresh autorevole dopo conflitto in Continua, selezione riconciliata e
+  pulsante disponibile soltanto con almeno un articolo selezionato;
+- callback scadute ed edit identici gestiti nei soli casi Telegram previsti;
+- diagnostica dei cinque predicati di prenotabilità e protezione del token
+  negli URL dei log HTTP.
 
 Obiettivi residui:
 - mantenere `ORDINI` permanentemente in sola lettura;

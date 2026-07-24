@@ -101,6 +101,24 @@ def _is_message_not_modified(error: BadRequest) -> bool:
     return "message is not modified" in str(error).lower()
 
 
+def _is_query_too_old(error: BadRequest) -> bool:
+    return (
+        "query is too old and response timeout expired "
+        "or query id is invalid"
+    ) in str(error).lower()
+
+
+async def _answer_query(query, *args, **kwargs) -> bool:
+    """Conferma una callback ignorando soltanto la scadenza Telegram."""
+    try:
+        await query.answer(*args, **kwargs)
+        return True
+    except BadRequest as error:
+        if _is_query_too_old(error):
+            return False
+        raise
+
+
 async def _edit_query(query, text: str, reply_markup=None) -> None:
     try:
         await query.edit_message_text(
@@ -172,7 +190,8 @@ async def _record_v2_event(
 async def _require_v2(query) -> bool:
     if is_shipping_v2_active():
         return True
-    await query.answer(
+    await _answer_query(
+        query,
         "Questa procedura non è più attiva. Riapri gli ordini.",
         show_alert=True,
     )
@@ -357,7 +376,7 @@ async def show_v2_available_orders(
     query = update.callback_query
     if not await _require_v2(query):
         return
-    await query.answer()
+    await _answer_query(query)
     try:
         await _render_available(
             query,
@@ -388,7 +407,7 @@ async def toggle_v2_available_item(
     query = update.callback_query
     if not await _require_v2(query):
         return
-    await query.answer()
+    await _answer_query(query)
     item_id = (query.data or "").split(":", 1)[-1].strip().upper()
     try:
         selected = toggle_item(context.user_data, item_id)
@@ -417,7 +436,7 @@ async def change_v2_items_page(
     query = update.callback_query
     if not await _require_v2(query):
         return
-    await query.answer()
+    await _answer_query(query)
     requested = (query.data or "").split(":", 1)[-1]
     page = set_page(context.user_data, requested)
     items = context.user_data.get(AVAILABLE_ITEMS, [])
@@ -579,13 +598,15 @@ async def continue_v2_shipping(
     if not await _require_v2(query):
         return
     selected = selected_item_ids(context.user_data)
+    answer_args = (
+        ("Seleziona almeno un articolo.",)
+        if not selected
+        else ()
+    )
+    answer_kwargs = {"show_alert": True} if not selected else {}
+    await _answer_query(query, *answer_args, **answer_kwargs)
     if not selected:
-        await query.answer(
-            "Seleziona almeno un articolo.",
-            show_alert=True,
-        )
         return
-    await query.answer()
     user = query.from_user
     previous_items = context.user_data.get(AVAILABLE_ITEMS, [])
     try:
@@ -642,6 +663,7 @@ async def continue_v2_shipping(
             state = await asyncio.to_thread(
                 prepare_v2_opening_state,
                 user.id,
+                force_refresh=True,
             )
             if state.get("active_draft"):
                 await _render_available(query, context, state=state)
@@ -681,8 +703,8 @@ async def continue_v2_shipping(
                 query,
                 page_title("⚠️", "Disponibilità cambiata")
                 + "\n\n"
-                "Uno o più articoli non sono più disponibili. "
-                "Controlla la selezione aggiornata."
+                "La disponibilità è cambiata. Seleziona nuovamente "
+                "gli articoli disponibili."
                 + unavailable_text,
                 reply_markup=v2_available_orders_keyboard(
                     items,
@@ -740,7 +762,7 @@ async def resume_v2_shipping(
     query = update.callback_query
     if not await _require_v2(query):
         return
-    await query.answer()
+    await _answer_query(query)
     user = query.from_user
     draft_uuid = clean_value(context.user_data.get(DRAFT_UUID, ""))
     try:
@@ -816,7 +838,7 @@ async def select_v2_shipping_carrier(
     query = update.callback_query
     if not await _require_v2(query):
         return
-    await query.answer()
+    await _answer_query(query)
     user = query.from_user
     draft_uuid = clean_value(context.user_data.get(DRAFT_UUID, ""))
     try:
@@ -971,7 +993,7 @@ async def cancel_v2_shipping(
     query = update.callback_query
     if not await _require_v2(query):
         return
-    await query.answer()
+    await _answer_query(query)
     callback = query.data or ""
     reason = (
         "CAMBIO_ARTICOLI"
@@ -1036,7 +1058,7 @@ async def start_v2_shipping_payment(
     query = update.callback_query
     if not await _require_v2(query):
         return ConversationHandler.END
-    await query.answer()
+    await _answer_query(query)
     user = query.from_user
     draft_uuid = clean_value(context.user_data.get(DRAFT_UUID, ""))
     try:
@@ -1446,7 +1468,7 @@ async def cancel_v2_shipping_receipt(
     receipt_state: int,
 ) -> int:
     query = update.callback_query
-    await query.answer()
+    await _answer_query(query)
     try:
         await _release_user_draft(
             query.from_user,
