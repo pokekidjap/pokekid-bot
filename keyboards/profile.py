@@ -3,17 +3,18 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 def profile_keyboard(
     has_profile: bool,
+    is_complete: bool | None = None,
 ) -> InlineKeyboardMarkup:
     """
     Tastiera principale della sezione Profilo.
     """
     keyboard = []
 
-    if has_profile:
+    if has_profile and is_complete is not False:
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    "📍 Visualizza dati spedizione",
+                    "📍 Dati di spedizione",
                     callback_data="profile_shipping_data",
                 )
             ]
@@ -22,7 +23,7 @@ def profile_keyboard(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    "✏️ Modifica dati spedizione",
+                    "✏️ Modifica",
                     callback_data="profile_edit_data",
                 )
             ]
@@ -31,8 +32,18 @@ def profile_keyboard(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    "🗑 Elimina dati salvati",
+                    "🗑 Elimina",
                     callback_data="profile_delete_confirm",
+                )
+            ]
+        )
+
+    elif has_profile:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "📝 Completa profilo",
+                    callback_data="profile_edit_data",
                 )
             ]
         )
@@ -41,7 +52,7 @@ def profile_keyboard(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    "➕ Inserisci dati spedizione",
+                    "➕ Inserisci dati",
                     callback_data="profile_add_data",
                 )
             ]
@@ -59,7 +70,7 @@ def profile_keyboard(
     keyboard.append(
         [
             InlineKeyboardButton(
-                "⬅️ Torna alla Home",
+                "🏠 Menu principale",
                 callback_data="menu_home",
             )
         ]
@@ -85,7 +96,7 @@ def profile_data_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(
-                "⬅️ Torna al Profilo",
+                "⬅️ Indietro",
                 callback_data="menu_profile",
             )
         ],
@@ -101,7 +112,7 @@ def profile_delete_confirmation_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton(
-                "✅ Sì, elimina",
+                "✅ Elimina",
                 callback_data="profile_delete",
             )
         ],
@@ -123,7 +134,7 @@ def profile_back_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton(
-                "⬅️ Torna al Profilo",
+                "⬅️ Indietro",
                 callback_data="menu_profile",
             )
         ]
@@ -139,7 +150,7 @@ def profile_form_cancel_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton(
-                "❌ Annulla inserimento",
+                "❌ Annulla",
                 callback_data="profile_form_cancel",
             )
         ]

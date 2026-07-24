@@ -1,6 +1,7 @@
 """Invio centralizzato delle notifiche Telegram."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from html import escape
 
@@ -15,7 +16,8 @@ logger = logging.getLogger(__name__)
 async def notify_admins(bot, text: str, footer: bool = True) -> tuple[int, int]:
     sent = failed = 0
     payload = with_footer(text) if footer else text
-    for admin in get_admins(active_only=True):
+    admins = await asyncio.to_thread(get_admins, active_only=True)
+    for admin in admins:
         try:
             await bot.send_message(int(admin["TELEGRAM_ID"]), payload, parse_mode="HTML")
             sent += 1
@@ -26,12 +28,13 @@ async def notify_admins(bot, text: str, footer: bool = True) -> tuple[int, int]:
 
 
 async def notify_warehouse_users(bot, usernames) -> dict:
-    template = get_config_values().get("MSG_MAGAZZINO", {}).get("value", "").strip()
     result = {"sent": 0, "failed": 0, "missing": []}
     if not usernames:
         return result
 
-    profiles = get_all_profiles()
+    config = await asyncio.to_thread(get_config_values)
+    template = config.get("MSG_MAGAZZINO", {}).get("value", "").strip()
+    profiles = await asyncio.to_thread(get_all_profiles)
     profiles_by_username = {
         profile.get("USERNAME", ""): profile
         for profile in profiles
@@ -68,13 +71,14 @@ async def notify_warehouse_users(bot, usernames) -> dict:
 
 
 async def send_broadcast(bot, message: str) -> dict:
-    config = get_config_values()
+    config = await asyncio.to_thread(get_config_values)
     custom_footer = config.get("MSG_BROADCAST_FOOTER", {}).get("value", "").strip()
     payload = message + (f"\n\n{custom_footer}" if custom_footer else "")
     payload = with_footer(payload)
     sent = failed = 0
     seen = set()
-    for profile in get_all_profiles():
+    profiles = await asyncio.to_thread(get_all_profiles)
+    for profile in profiles:
         telegram_id = str(profile.get("TELEGRAM_ID", "")).strip()
         if not telegram_id or telegram_id in seen:
             continue

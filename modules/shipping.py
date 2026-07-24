@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from html import escape
 
@@ -11,12 +12,29 @@ from telegram.ext import (
     ConversationHandler,
 )
 
+from keyboards.orders import shipping_profile_incomplete_keyboard
 from services.bot_db import (
     create_shipping_request,
     get_admins,
+    get_profile,
     is_sorting_active,
 )
-from services.ui import with_footer
+from services.perf import start_flow
+from services.profiles import is_shipping_profile_complete
+from services.shipping_engine import is_shipping_v2_active
+from services.sheets import get_user_orders
+from services.ui import (
+    operation_unavailable,
+    page_title,
+    section_title,
+    with_footer,
+)
+from modules.shipping_v2 import (
+    cancel_v2_shipping_receipt,
+    cancel_v2_shipping_receipt_command,
+    receive_v2_shipping_receipt,
+    start_v2_shipping_payment,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -58,7 +76,7 @@ def shipping_receipt_cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[
             InlineKeyboardButton(
-                "❌ Annulla richiesta",
+                "❌ Annulla",
                 callback_data="shipping_receipt_cancel",
             )
         ]]
@@ -70,15 +88,13 @@ def shipping_completed_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    "📦 Torna ai miei ordini",
+                    "⬅️ Indietro",
                     callback_data="menu_orders",
-                )
-            ],
-            [
+                ),
                 InlineKeyboardButton(
                     "🏠 Menu principale",
                     callback_data="menu_home",
-                )
+                ),
             ],
         ]
     )
@@ -94,6 +110,7 @@ def clear_shipping_data(
         "shipping_profile",
         "shipping_methods",
         "selected_carrier",
+        "shipping_selection_timestamp",
         "waiting_shipping_receipt",
     ]
 
@@ -134,6 +151,45 @@ def build_products_text(
     return " | ".join(products)
 
 
+def selected_orders_are_still_available(
+    selected_orders: list[dict],
+    current_orders: list[dict],
+) -> bool:
+    """Verifica riga, nome, quantità e disponibilità della selezione."""
+    current_by_row = {
+        order.get("row_number"): order
+        for order in current_orders
+    }
+
+    for selected_order in selected_orders:
+        current_order = current_by_row.get(
+            selected_order.get("row_number")
+        )
+
+        if current_order is None:
+            return False
+
+        if (
+            str(current_order.get("name", "")).strip()
+            != str(selected_order.get("name", "")).strip()
+        ):
+            return False
+
+        if (
+            current_order.get("quantity")
+            != selected_order.get("quantity")
+        ):
+            return False
+
+        if (
+            str(current_order.get("status", "")).strip().upper()
+            != "IN MAGAZZINO"
+        ):
+            return False
+
+    return True
+
+
 async def notify_admins(
     context: ContextTypes.DEFAULT_TYPE,
     shipping_request: dict,
@@ -164,7 +220,8 @@ async def notify_admins(
         ]]
     )
 
-    for admin in get_admins():
+    admins = await asyncio.to_thread(get_admins)
+    for admin in admins:
         telegram_id = admin.get(
             "TELEGRAM_ID",
             "",
@@ -192,21 +249,36 @@ async def start_shipping_payment(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
+    with start_flow("shipping_payment"):
+        return await _start_shipping_payment(update, context)
+
+
+async def _start_shipping_payment(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    if is_shipping_v2_active():
+        return await start_v2_shipping_payment(
+            update,
+            context,
+            receipt_state=SHIPPING_PAYMENT_RECEIPT,
+        )
+
     query = update.callback_query
 
-    with start_flow("shipping_payment"):
-        await query.answer()
+    await query.answer()
 
-        if is_sorting_active():
-            await _edit_shipping_query(
-                query,
-                "📦 <b>Smistamento in corso</b>\n\n"
-                "Le richieste di spedizione sono temporaneamente sospese. "
-                "Riprova quando lo smistamento sarà completato.",
-                reply_markup=shipping_completed_keyboard(),
-            )
-            clear_shipping_data(context)
-            return ConversationHandler.END
+    if await asyncio.to_thread(is_sorting_active):
+        await _edit_shipping_query(
+            query,
+            page_title("📦", "Smistamento in corso")
+            + "\n\n"
+            "Le richieste di spedizione sono temporaneamente sospese. "
+            "Riprova quando lo smistamento sarà completato.",
+            reply_markup=shipping_completed_keyboard(),
+        )
+        clear_shipping_data(context)
+        return ConversationHandler.END
 
     selected_orders = context.user_data.get(
         "selected_orders",
@@ -226,9 +298,9 @@ async def start_shipping_payment(
     ):
         await _edit_shipping_query(
             query,
-            "⚠️ <b>Richiesta non valida</b>\n\n"
-            "I dati della spedizione non sono più "
-            "disponibili. Ripeti la procedura.",
+            operation_unavailable(
+                "I dati della spedizione non sono più disponibili."
+            ),
             reply_markup=shipping_completed_keyboard(),
         )
         clear_shipping_data(context)
@@ -240,10 +312,13 @@ async def start_shipping_payment(
 
     await _edit_shipping_query(
         query,
-        "📎 <b>Invia la ricevuta del pagamento</b>\n\n"
+        page_title("📎", "Invia la ricevuta")
+        + "\n\n"
         "Invia una foto oppure un documento/PDF.\n\n"
-        f"🚚 Corriere: <b>{escape(selected_carrier['name'])}</b>\n"
-        f"💶 Importo: <b>€ {selected_carrier['price']:.2f}</b>",
+        + section_title("🚚", "Spedizione")
+        + "\n"
+        + f"Corriere: <b>{escape(selected_carrier['name'])}</b>\n"
+        + f"Importo: <b>€ {selected_carrier['price']:.2f}</b>",
         reply_markup=shipping_receipt_cancel_keyboard(),
     )
 
@@ -254,15 +329,29 @@ async def receive_shipping_receipt(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
+    with start_flow("shipping_receipt"):
+        return await _receive_shipping_receipt(update, context)
+
+
+async def _receive_shipping_receipt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    if is_shipping_v2_active():
+        return await receive_v2_shipping_receipt(
+            update,
+            context,
+            receipt_state=SHIPPING_PAYMENT_RECEIPT,
+        )
+
     message = update.effective_message
     user = update.effective_user
 
-    with start_flow("shipping_receipt"):
-        if not message or not user:
-            return SHIPPING_PAYMENT_RECEIPT
+    if not message or not user:
+        return SHIPPING_PAYMENT_RECEIPT
 
-        payment_file_id = ""
-        payment_type = ""
+    payment_file_id = ""
+    payment_type = ""
 
     if message.photo:
         payment_file_id = message.photo[-1].file_id
@@ -274,7 +363,8 @@ async def receive_shipping_receipt(
     if not payment_file_id:
         await _reply_shipping_message(
             message,
-            "⚠️ Invia una foto oppure un documento/PDF.",
+            "⚠️ <b>Allegato non valido</b>\n\n"
+            "Invia una foto oppure un documento/PDF.",
             reply_markup=shipping_receipt_cancel_keyboard(),
         )
         return SHIPPING_PAYMENT_RECEIPT
@@ -286,21 +376,115 @@ async def receive_shipping_receipt(
     selected_carrier = context.user_data.get(
         "selected_carrier"
     )
-    shipping_profile = context.user_data.get(
-        "shipping_profile"
-    )
 
     if (
         not selected_orders
         or not selected_carrier
-        or not shipping_profile
     ):
         await _reply_shipping_message(
             message,
-            "⚠️ Sessione scaduta. Ripeti la procedura.",
+            operation_unavailable(
+                "La sessione di spedizione è scaduta."
+            ),
             reply_markup=shipping_completed_keyboard(),
         )
         clear_shipping_data(context)
+        return ConversationHandler.END
+
+    try:
+        sorting_active = await asyncio.to_thread(
+            is_sorting_active
+        )
+    except Exception:
+        logger.exception(
+            "Errore verifica smistamento prima della spedizione"
+        )
+        await _reply_shipping_message(
+            message,
+            operation_unavailable(
+                "Non è stato possibile verificare lo stato delle spedizioni."
+            ),
+            reply_markup=shipping_receipt_cancel_keyboard(),
+        )
+        return SHIPPING_PAYMENT_RECEIPT
+
+    if sorting_active:
+        clear_shipping_data(context)
+        await _reply_shipping_message(
+            message,
+            page_title("📦", "Smistamento in corso")
+            + "\n\n"
+            "Lo smistamento è iniziato durante la procedura. "
+            "Riprova quando sarà completato.",
+            reply_markup=shipping_completed_keyboard(),
+        )
+        return ConversationHandler.END
+
+    try:
+        fresh_profile = await asyncio.to_thread(
+            get_profile,
+            user.id,
+            force_refresh=True,
+        )
+    except Exception:
+        logger.exception(
+            "Errore rilettura profilo prima della spedizione"
+        )
+        await _reply_shipping_message(
+            message,
+            operation_unavailable(
+                "Non è stato possibile verificare il profilo."
+            ),
+            reply_markup=shipping_receipt_cancel_keyboard(),
+        )
+        return SHIPPING_PAYMENT_RECEIPT
+
+    if not is_shipping_profile_complete(
+        fresh_profile
+    ):
+        clear_shipping_data(context)
+        await _reply_shipping_message(
+            message,
+            "⚠️ <b>Profilo modificato</b>\n\n"
+            "Il profilo è stato eliminato o modificato. "
+            "Completa i dati e ripeti la procedura.",
+            reply_markup=shipping_profile_incomplete_keyboard(
+                has_profile=fresh_profile is not None,
+            ),
+        )
+        return ConversationHandler.END
+
+    try:
+        current_orders = await asyncio.to_thread(
+            get_user_orders,
+            user.username,
+            force_refresh=True,
+        )
+    except Exception:
+        logger.exception(
+            "Errore rilettura ordini prima della spedizione"
+        )
+        await _reply_shipping_message(
+            message,
+            operation_unavailable(
+                "Non è stato possibile verificare gli articoli."
+            ),
+            reply_markup=shipping_receipt_cancel_keyboard(),
+        )
+        return SHIPPING_PAYMENT_RECEIPT
+
+    if not selected_orders_are_still_available(
+        selected_orders,
+        current_orders,
+    ):
+        clear_shipping_data(context)
+        await _reply_shipping_message(
+            message,
+            "⚠️ <b>Articoli modificati</b>\n\n"
+            "La disponibilità dei tuoi articoli è cambiata. "
+            "Riapri gli ordini e ripeti la selezione.",
+            reply_markup=shipping_completed_keyboard(),
+        )
         return ConversationHandler.END
 
     products = build_products_text(
@@ -308,14 +492,15 @@ async def receive_shipping_receipt(
     )
 
     try:
-        shipping_request = create_shipping_request(
+        shipping_request = await asyncio.to_thread(
+            create_shipping_request,
             telegram_id=user.id,
             username=user.username,
             products=products,
             carrier=selected_carrier["name"],
             shipping_cost=selected_carrier["price"],
             payment_file_id=payment_file_id,
-            profile=shipping_profile,
+            profile=fresh_profile,
             notes=(
                 "Ricevuta inviata tramite bot. "
                 f"Tipo allegato: {payment_type}."
@@ -328,7 +513,9 @@ async def receive_shipping_receipt(
         )
         await _reply_shipping_message(
             message,
-            "⚠️ Errore durante il salvataggio. Riprova.",
+            operation_unavailable(
+                "Non è stato possibile salvare la richiesta."
+            ),
             reply_markup=shipping_receipt_cancel_keyboard(),
         )
         return SHIPPING_PAYMENT_RECEIPT
@@ -354,12 +541,12 @@ async def receive_shipping_receipt(
 
     await _reply_shipping_message(
         message,
-        "✅ <b>Richiesta di spedizione inviata!</b>\n\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
+        page_title("✅", "Richiesta completata")
+        + "\n\n"
         f"🆔 Richiesta: <code>{escape(shipping_id)}</code>\n"
         f"🚚 Corriere: <b>{escape(carrier)}</b>\n"
         f"💶 Costo: <b>€ {shipping_cost:.2f}</b>\n"
-        "📋 Stato: <b>IN_ATTESA</b>\n\n"
+        "📋 Stato: <b>In attesa</b>\n\n"
         "Riceverai il tracking quando la spedizione "
         "verrà preparata.",
         reply_markup=shipping_completed_keyboard(),
@@ -376,7 +563,8 @@ async def invalid_shipping_receipt(
     if message:
         await _reply_shipping_message(
             message,
-            "⚠️ Sto aspettando una foto o un documento/PDF.",
+            "⚠️ <b>Allegato non valido</b>\n\n"
+            "Invia una foto oppure un documento/PDF.",
             reply_markup=shipping_receipt_cancel_keyboard(),
         )
     return SHIPPING_PAYMENT_RECEIPT
@@ -386,14 +574,33 @@ async def cancel_shipping_receipt(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> int:
+    if is_shipping_v2_active():
+        return await cancel_v2_shipping_receipt(
+            update,
+            context,
+            receipt_state=SHIPPING_PAYMENT_RECEIPT,
+        )
+
     query = update.callback_query
     await query.answer()
     clear_shipping_data(context)
 
     await _edit_shipping_query(
         query,
-        "❌ Richiesta di spedizione annullata.",
+        "❌ <b>Richiesta annullata</b>\n\n"
+        "Nessuna richiesta è stata salvata.",
         reply_markup=shipping_completed_keyboard(),
     )
 
     return ConversationHandler.END
+
+
+async def cancel_shipping_receipt_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int | None:
+    return await cancel_v2_shipping_receipt_command(
+        update,
+        context,
+        receipt_state=SHIPPING_PAYMENT_RECEIPT,
+    )

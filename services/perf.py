@@ -2,6 +2,8 @@ import contextvars
 import dataclasses
 import logging
 import time
+from functools import wraps
+from typing import Awaitable, Callable, TypeVar
 
 logger = logging.getLogger("perf")
 
@@ -64,7 +66,12 @@ class perf_flow:
         if self.token is not None:
             _current_perf_context.reset(self.token)
         if self.context is not None:
-            logger.info("perf: %s", self.context.summary())
+            log_method = (
+                logger.warning
+                if self.context.total_ms() > 1500
+                else logger.info
+            )
+            log_method("perf: %s", self.context.summary())
 
 
 def start_flow(flow_name: str) -> perf_flow:
@@ -73,3 +80,29 @@ def start_flow(flow_name: str) -> perf_flow:
 
 def get_perf_context() -> PerfContext | None:
     return _current_perf_context.get()
+
+
+_T = TypeVar("_T")
+
+
+def track_async_flow(
+    flow_name: str | Callable[..., str],
+) -> Callable[[Callable[..., Awaitable[_T]]], Callable[..., Awaitable[_T]]]:
+    """Registra un handler async senza modificarne il contratto pubblico."""
+
+    def decorator(
+        function: Callable[..., Awaitable[_T]],
+    ) -> Callable[..., Awaitable[_T]]:
+        @wraps(function)
+        async def wrapped(*args, **kwargs) -> _T:
+            resolved = (
+                flow_name(*args, **kwargs)
+                if callable(flow_name)
+                else flow_name
+            )
+            with start_flow(resolved):
+                return await function(*args, **kwargs)
+
+        return wrapped
+
+    return decorator

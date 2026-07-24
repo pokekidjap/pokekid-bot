@@ -14,7 +14,7 @@ def grading_keyboard(
         if page > 1:
             pagination_row.append(
                 InlineKeyboardButton(
-                    "⬅️ Pagina precedente",
+                    "◀️ Precedente",
                     callback_data=f"grading_page:{page - 1}",
                 )
             )
@@ -22,7 +22,7 @@ def grading_keyboard(
         if page < total_pages:
             pagination_row.append(
                 InlineKeyboardButton(
-                    "➡️ Pagina successiva",
+                    "Successiva ▶️",
                     callback_data=f"grading_page:{page + 1}",
                 )
             )
@@ -36,7 +36,7 @@ def grading_keyboard(
                 callback_data="grading_refresh",
             ),
             InlineKeyboardButton(
-                "🔎 Cerca SUB",
+                "🔎 Cerca",
                 callback_data="grading_search",
             ),
         ]
@@ -55,7 +55,7 @@ def grading_keyboard(
     keyboard.append(
         [
             InlineKeyboardButton(
-                "⬅️ Torna al menu",
+                "🏠 Menu principale",
                 callback_data="menu_home",
             )
         ]

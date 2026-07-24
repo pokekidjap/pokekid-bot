@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from html import escape
 
@@ -11,6 +12,7 @@ from keyboards.admin import (
     admin_home_keyboard,
     admin_orders_back_keyboard,
     admin_shipping_detail_keyboard,
+    admin_shipping_cancel_confirm_keyboard,
     admin_shipping_list_keyboard,
     admin_tracking_cancel_keyboard,
     admin_users_keyboard,
@@ -19,7 +21,6 @@ from keyboards.admin import (
 )
 from services.admin_orders import get_orders_grouped_by_user
 from services.bot_db import (
-    complete_shipping_request,
     get_admin,
     get_admins,
     get_all_shipping_requests,
@@ -34,15 +35,64 @@ from services.bot_db import (
     set_sorting_status,
 )
 from services.notifications import notify_warehouse_users, send_broadcast
+from services.shipping_v2 import (
+    ShippingV2TrackingConflictError,
+    complete_shipping_request_by_version,
+)
+from services.shipping_v2_join import (
+    ShippingV2AdminCancelError,
+    cancel_v2_shipping_request_by_admin,
+    get_v2_shipping_items_grouped_by_owner,
+)
 from services.stats import get_admin_statistics
 from services.sorting import clear_sorting_snapshot, get_users_with_new_ready_items, save_sorting_snapshot
-from services.ui import BOT_VERSION, LAST_UPDATE, compact_error, with_footer, page_title
+from services.bot_version import get_bot_version
+from services.ui import LAST_UPDATE, compact_error, with_footer, page_title
 
 logger = logging.getLogger(__name__)
 ADMIN_TRACKING = 20
 ADMIN_BROADCAST = 21
 ADMIN_MESSAGE_EDIT = 22
 ADMIN_BROADCAST_CONFIRM = 23
+
+
+def _v2_grouped_items_text(groups: list[dict], budget: int = 1800) -> str:
+    sections = []
+    omitted = 0
+    effective_budget = max(0, budget - 80)
+    for group in groups:
+        role = escape(group.get("RUOLO", "") or "CONTRIBUENTE")
+        username = escape(group.get("USERNAME", "") or "(senza username)")
+        telegram_id = escape(group.get("TELEGRAM_ID", ""))
+        header = (
+            f"<b>{role} — {username}</b>\n"
+            f"Telegram ID: <code>{telegram_id}</code>\n"
+            f"Articoli: <b>{group.get('NUMERO_ARTICOLI', 0)}</b> · "
+            f"Quantità: <b>{group.get('QUANTITA_TOTALE', 0)}</b>"
+        )
+        if len("\n\n".join(sections + [header])) > effective_budget:
+            omitted += len(group.get("ITEMS", []))
+            continue
+        item_lines = []
+        for item in group.get("ITEMS", []):
+            line = (
+                f"• {escape(item.get('OGGETTO_SNAPSHOT', ''))} "
+                f"×{escape(item.get('QUANTITA_SNAPSHOT', '') or '1')}"
+            )
+            candidate = "\n\n".join(
+                sections + [header + "\n" + "\n".join(item_lines + [line])]
+            )
+            if len(candidate) > effective_budget:
+                omitted += 1
+                continue
+            item_lines.append(line)
+        sections.append(
+            header + ("\n" + "\n".join(item_lines) if item_lines else "")
+        )
+    text = "\n\n".join(sections)
+    if omitted:
+        text += f"\n\n… e altri {omitted} articoli"
+    return text
 
 
 def _admin_response(text: str) -> str:
@@ -83,17 +133,37 @@ async def _admin_error_reply(message_obj, message: str) -> None:
     await _reply_admin_message(message_obj, compact_error(message))
 
 
-async def deny_admin_access(update: Update) -> None:
+async def deny_admin_access(
+    update: Update,
+    *,
+    callback_answered: bool = False,
+) -> None:
     if update.callback_query:
-        await update.callback_query.answer("Accesso non autorizzato.", show_alert=True)
+        if callback_answered:
+            await update.callback_query.edit_message_text(
+                "Accesso non autorizzato."
+            )
+        else:
+            await update.callback_query.answer(
+                "Accesso non autorizzato.",
+                show_alert=True,
+            )
     elif update.effective_message:
         await update.effective_message.reply_text("⛔ Accesso non autorizzato.")
 
 
 async def check_admin(update: Update) -> bool:
+    callback_answered = False
+    if update.callback_query:
+        await update.callback_query.answer()
+        callback_answered = True
+
     user = update.effective_user
-    if not user or not is_admin(user.id):
-        await deny_admin_access(update)
+    if not user or not await asyncio.to_thread(is_admin, user.id):
+        await deny_admin_access(
+            update,
+            callback_answered=callback_answered,
+        )
         return False
     return True
 
@@ -109,9 +179,9 @@ def _admin_home_text() -> str:
 
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await check_admin(update):
-        return
     with start_flow("admin_dashboard"):
+        if not await check_admin(update):
+            return
         await _reply_admin_message(
             update.effective_message,
             _admin_home_text(),
@@ -120,11 +190,10 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def show_admin_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await check_admin(update):
-        return
-    query = update.callback_query
-    await query.answer()
     with start_flow("admin_dashboard"):
+        if not await check_admin(update):
+            return
+        query = update.callback_query
         await _edit_admin_query(
             query,
             _admin_home_text(),
@@ -133,19 +202,25 @@ async def show_admin_home(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def show_orders_by_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    with start_flow("admin_orders_by_user"):
+        await _show_orders_by_user(update, context)
+
+
+async def _show_orders_by_user(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
     if not await check_admin(update):
         return
     query = update.callback_query
 
-    with start_flow("admin_orders_by_user"):
-        await query.answer()
-        try:
-            users = get_orders_grouped_by_user()
-        except Exception:
-            logger.exception("Errore lettura ordini per utente")
-            await _admin_error_edit(query, "Impossibile leggere gli ordini.", reply_markup=admin_home_keyboard())
-            return
-        context.user_data["admin_order_users"] = users
+    try:
+        users = await asyncio.to_thread(get_orders_grouped_by_user)
+    except Exception:
+        logger.exception("Errore lettura ordini per utente")
+        await _admin_error_edit(query, "Impossibile leggere gli ordini.", reply_markup=admin_home_keyboard())
+        return
+    context.user_data["admin_order_users"] = users
     await _edit_admin_query(
         query,
         "👥 <b>Ordini per utente</b>\n\n"
@@ -156,19 +231,21 @@ async def show_orders_by_user(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def show_user_orders_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+
     if not await check_admin(update):
         return
-
-    query = update.callback_query
 
     try:
         index = int(query.data.split(":", 1)[1])
         user = context.user_data.get("admin_order_users", [])[index]
     except (ValueError, IndexError, AttributeError):
-        await query.answer("Elenco scaduto: aggiorna.", show_alert=True)
+        await query.edit_message_text(
+            "Elenco scaduto: aggiorna.",
+            reply_markup=admin_orders_back_keyboard(),
+            parse_mode="HTML",
+        )
         return
-
-    await query.answer()
 
     status_icons = {
         "IN MAGAZZINO": "🟢",
@@ -250,15 +327,18 @@ async def start_sorting(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not await check_admin(update):
         return
     query = update.callback_query
-    if is_sorting_active():
-        await query.answer("Uno smistamento è già attivo.", show_alert=True)
+    if await asyncio.to_thread(is_sorting_active):
+        await _edit_admin_query(
+            query,
+            "Uno smistamento è già attivo.",
+            reply_markup=admin_home_keyboard(),
+        )
         return
-    await query.answer()
-    admin = get_admin(query.from_user.id) or {}
+    admin = await asyncio.to_thread(get_admin, query.from_user.id) or {}
     admin_name = admin.get("USERNAME", str(query.from_user.id))
     try:
-        ready_before = save_sorting_snapshot()
-        set_sorting_status(True, admin_name)
+        ready_before = await asyncio.to_thread(save_sorting_snapshot)
+        await asyncio.to_thread(set_sorting_status, True, admin_name)
     except Exception:
         logger.exception("Errore avvio smistamento")
         await _admin_error_edit(query, "Impossibile avviare lo smistamento.", reply_markup=admin_home_keyboard())
@@ -276,15 +356,18 @@ async def complete_sorting(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not await check_admin(update):
         return
     query = update.callback_query
-    if not is_sorting_active():
-        await query.answer("Non risulta alcuno smistamento attivo.", show_alert=True)
+    if not await asyncio.to_thread(is_sorting_active):
+        await _edit_admin_query(
+            query,
+            "Non risulta alcuno smistamento attivo.",
+            reply_markup=admin_home_keyboard(),
+        )
         return
-    await query.answer()
-    admin = get_admin(query.from_user.id) or {}
+    admin = await asyncio.to_thread(get_admin, query.from_user.id) or {}
     admin_name = admin.get("USERNAME", str(query.from_user.id))
 
     try:
-        changed_users = get_users_with_new_ready_items()
+        changed_users = await asyncio.to_thread(get_users_with_new_ready_items)
     except Exception:
         logger.exception("Errore confronto smistamento")
         await _admin_error_edit(
@@ -299,9 +382,10 @@ async def complete_sorting(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     failed = notification_result["failed"]
     missing_profiles = notification_result["missing"]
 
-    set_sorting_status(False, admin_name)
-    clear_sorting_snapshot()
-    write_log(
+    await asyncio.to_thread(set_sorting_status, False, admin_name)
+    await asyncio.to_thread(clear_sorting_snapshot)
+    await asyncio.to_thread(
+        write_log,
         action="NOTIFICHE_SMISTAMENTO",
         details=f"Inviate={sent}; senza profilo={len(missing_profiles)}; errori={failed}",
         admin=admin_name,
@@ -332,17 +416,17 @@ async def show_bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await check_admin(update):
         return
     query = update.callback_query
-    await query.answer()
     try:
-        status = get_bot_status()
+        status = await asyncio.to_thread(get_bot_status)
         database_line = "🟢 Database"
         sheets_line = "🟢 Google Sheets"
     except Exception:
         logger.exception("Errore stato bot")
+        admins = await asyncio.to_thread(get_admins)
         status = {
-            "version": BOT_VERSION,
+            "version": get_bot_version(),
             "profiles": 0,
-            "admins": len(get_admins()),
+            "admins": len(admins),
             "sorting": False,
         }
         database_line = "🔴 Database"
@@ -351,7 +435,7 @@ async def show_bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     sorting_line = "🟢 Smistamento ON" if status.get("sorting") else "🔴 Smistamento OFF"
     text = with_footer(
         "🤖 <b>Pokekid Bot</b>\n\n"
-        f"Versione: {escape(status.get('version') or BOT_VERSION)}\n\n"
+        f"Versione: {escape(status.get('version') or get_bot_version())}\n\n"
         f"{database_line}\n"
         f"{sheets_line}\n"
         "🟢 Bot Online\n"
@@ -371,9 +455,8 @@ async def show_admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not await check_admin(update):
         return
     query = update.callback_query
-    await query.answer()
     try:
-        stats = get_admin_statistics()
+        stats = await asyncio.to_thread(get_admin_statistics)
     except Exception:
         logger.exception("Errore statistiche admin")
         await _admin_error_edit(query, "Impossibile calcolare le statistiche. Riprova più tardi.", reply_markup=admin_home_keyboard())
@@ -399,9 +482,15 @@ async def show_admin_notifications(update: Update, context: ContextTypes.DEFAULT
     if not await check_admin(update):
         return
     query = update.callback_query
-    await query.answer()
+    await _render_admin_notifications(query, context)
+
+
+async def _render_admin_notifications(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
     try:
-        logs = get_recent_logs(50)
+        logs = await asyncio.to_thread(get_recent_logs, 50)
     except Exception:
         logger.exception("Errore lettura centro notifiche")
         await _admin_error_edit(query, "Impossibile leggere le notifiche.", reply_markup=admin_home_keyboard())
@@ -429,7 +518,7 @@ async def show_admin_notifications(update: Update, context: ContextTypes.DEFAULT
             f"<i>{escape(date)}</i>\n{escape(details[:220])}"
         )
 
-    config = get_config_values()
+    config = await asyncio.to_thread(get_config_values)
     seen_raw = config.get(f"ADMIN_NOTIFICHE_LETTE_{query.from_user.id}", {}).get("value", "0")
     try:
         seen = int(seen_raw or 0)
@@ -454,19 +543,22 @@ async def mark_admin_notifications_read(update: Update, context: ContextTypes.DE
     if not await check_admin(update):
         return
     query = update.callback_query
-    await query.answer()
-    logs = get_recent_logs(50)
+    logs = await asyncio.to_thread(get_recent_logs, 50)
     interesting_actions = {"USERNAME_AGGIORNATO", "NOTIFICHE_SMISTAMENTO", "BROADCAST", "SPEDIZIONE_COMPLETATA", "UTENTE_REGISTRATO"}
     count = sum(1 for item in logs if item.get("AZIONE", "") in interesting_actions)
-    set_config_value(f"ADMIN_NOTIFICHE_LETTE_{query.from_user.id}", str(count), True)
-    await show_admin_notifications(update, context)
+    await asyncio.to_thread(
+        set_config_value,
+        f"ADMIN_NOTIFICHE_LETTE_{query.from_user.id}",
+        str(count),
+        True,
+    )
+    await _render_admin_notifications(query, context)
 
 
 async def show_admin_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await check_admin(update):
         return
     query = update.callback_query
-    await query.answer()
     await _edit_admin_query(
         query,
         "💬 <b>Messaggi configurabili</b>\n\n"
@@ -479,9 +571,9 @@ async def start_message_edit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not await check_admin(update):
         return ConversationHandler.END
     query = update.callback_query
-    await query.answer()
     key = query.data.split(":", 1)[1]
-    current = get_config_values().get(key, {}).get("value", "") or "(testo predefinito)"
+    config = await asyncio.to_thread(get_config_values)
+    current = config.get(key, {}).get("value", "") or "(testo predefinito)"
     context.user_data["admin_message_key"] = key
     await _edit_admin_query(
         query,
@@ -506,7 +598,7 @@ async def receive_message_edit(update: Update, context: ContextTypes.DEFAULT_TYP
             await _admin_error_reply(message, "Testo non valido.")
         return ConversationHandler.END
     try:
-        set_config_value(key, text, True)
+        await asyncio.to_thread(set_config_value, key, text, True)
     except Exception:
         logger.exception("Errore salvataggio messaggio configurabile")
         if message:
@@ -525,7 +617,6 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await check_admin(update):
         return ConversationHandler.END
     query = update.callback_query
-    await query.answer()
     await _edit_admin_query(
         query,
         "📣 <b>Broadcast</b>\n\n"
@@ -561,7 +652,6 @@ async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not await check_admin(update):
         return ConversationHandler.END
     query = update.callback_query
-    await query.answer()
     message = context.user_data.pop("pending_broadcast", "")
     if not message:
         await _edit_admin_query(
@@ -571,8 +661,9 @@ async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return ConversationHandler.END
     result = await send_broadcast(context.bot, message)
-    admin = get_admin(update.effective_user.id) or {}
-    write_log(
+    admin = await asyncio.to_thread(get_admin, update.effective_user.id) or {}
+    await asyncio.to_thread(
+        write_log,
         action="BROADCAST",
         details=f"Inviati={result['sent']}; errori={result['failed']}; destinatari={result['total']}",
         admin=admin.get("USERNAME", ""),
@@ -591,7 +682,6 @@ async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not await check_admin(update):
         return ConversationHandler.END
     query = update.callback_query
-    await query.answer()
     context.user_data.pop("pending_broadcast", None)
     await _edit_admin_query(
         query,
@@ -605,7 +695,6 @@ async def cancel_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not await check_admin(update):
         return ConversationHandler.END
     query = update.callback_query
-    await query.answer()
     context.user_data.pop("admin_message_key", None)
     await _edit_admin_query(
         query,
@@ -627,9 +716,11 @@ async def _show_shipping_requests(update: Update, statuses: set[str] | None, his
     if not await check_admin(update):
         return
     query = update.callback_query
-    await query.answer()
     try:
-        requests = get_all_shipping_requests(statuses=statuses)
+        requests = await asyncio.to_thread(
+            get_all_shipping_requests,
+            statuses=statuses,
+        )
     except Exception:
         logger.exception("Errore lettura richieste")
         await _admin_error_edit(query, "Impossibile leggere le richieste.", reply_markup=admin_home_keyboard())
@@ -647,23 +738,46 @@ async def _show_shipping_requests(update: Update, statuses: set[str] | None, his
     )
 
 
-async def open_shipping_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await check_admin(update):
-        return
-    query = update.callback_query
-    await query.answer()
-    shipping_id = query.data.split(":", 1)[1]
-    request = get_shipping_request(shipping_id)
+async def _render_shipping_request_detail(query, shipping_id: str) -> None:
+    request = await asyncio.to_thread(get_shipping_request, shipping_id)
     if not request:
-        await query.answer("Richiesta non trovata.", show_alert=True)
+        await _edit_admin_query(
+            query,
+            "Richiesta non trovata.",
+            reply_markup=admin_home_keyboard(),
+        )
         return
+    grouped_items = None
+    if request.get("VERSIONE_SCHEMA", "").upper() == "V2":
+        try:
+            grouped_items = await asyncio.to_thread(
+                get_v2_shipping_items_grouped_by_owner,
+                shipping_id=request.get("ID", ""),
+                shipping_uuid=request.get("UUID_SPEDIZIONE", ""),
+            )
+        except Exception:
+            logger.exception(
+                "Errore lettura articoli raggruppati della richiesta %s",
+                shipping_id,
+            )
+            await _admin_error_edit(
+                query,
+                "Impossibile leggere il dettaglio aggiornato.",
+                reply_markup=admin_home_keyboard(),
+            )
+            return
     tracking = request.get("TRACKING", "") or "—"
+    products_text = (
+        _v2_grouped_items_text(grouped_items)
+        if grouped_items is not None
+        else f"🎴 {escape(request.get('PRODOTTI', ''))}"
+    )
     text = with_footer(
         "📦 <b>Dettaglio richiesta</b>\n\n"
         f"🆔 <code>{escape(request.get('ID', ''))}</code>\n"
         f"📋 Stato: <b>{escape(request.get('STATO', ''))}</b>\n"
         f"👤 {escape(request.get('USERNAME', ''))} · <code>{escape(request.get('TELEGRAM_ID', ''))}</code>\n\n"
-        f"🎴 {escape(request.get('PRODOTTI', ''))}\n\n"
+        f"{products_text}\n\n"
         f"🚚 {escape(request.get('CORRIERE', ''))} · € {escape(request.get('COSTO_SPEDIZIONE', ''))}\n"
         f"🔎 Tracking: <code>{escape(tracking)}</code>\n\n"
         f"📍 <b>{escape(request.get('NOME', ''))}</b>\n{escape(request.get('INDIRIZZO', ''))}\n"
@@ -673,20 +787,167 @@ async def open_shipping_request(update: Update, context: ContextTypes.DEFAULT_TY
     await _edit_admin_query(
         query,
         text,
-        reply_markup=admin_shipping_detail_keyboard(shipping_id),
+        reply_markup=admin_shipping_detail_keyboard(
+            shipping_id,
+            allow_v2_cancel=(
+                request.get("VERSIONE_SCHEMA", "").upper() == "V2"
+                and request.get("STATO", "").upper() == "IN_ATTESA"
+                and not request.get("TRACKING", "")
+            ),
+        ),
+    )
+
+
+async def open_shipping_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await check_admin(update):
+        return
+    query = update.callback_query
+    data = query.data or ""
+    if ":" not in data or not data.split(":", 1)[1]:
+        await _edit_admin_query(
+            query,
+            "Richiesta non trovata.",
+            reply_markup=admin_home_keyboard(),
+        )
+        return
+    await _render_shipping_request_detail(query, data.split(":", 1)[1])
+
+
+async def show_admin_shipping_cancel_confirmation(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not await check_admin(update):
+        return
+    query = update.callback_query
+    shipping_id = (query.data or "").split(":", 1)[-1].strip()
+    request = await asyncio.to_thread(get_shipping_request, shipping_id)
+    if not (
+        request
+        and request.get("VERSIONE_SCHEMA", "").upper() == "V2"
+        and request.get("STATO", "").upper() == "IN_ATTESA"
+        and not request.get("TRACKING", "")
+    ):
+        await _admin_error_edit(
+            query,
+            "La richiesta non è più annullabile.",
+            reply_markup=admin_home_keyboard(),
+        )
+        return
+    await _edit_admin_query(
+        query,
+        "⚠️ <b>Conferma annullamento</b>\n\n"
+        f"Richiesta: <code>{escape(shipping_id)}</code>\n\n"
+        "L'intera spedizione verrà annullata e tutti gli articoli "
+        "collegati torneranno disponibili.",
+        reply_markup=admin_shipping_cancel_confirm_keyboard(shipping_id),
+    )
+
+
+async def return_admin_shipping_detail(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not await check_admin(update):
+        return
+    query = update.callback_query
+    shipping_id = (query.data or "").split(":", 1)[-1].strip()
+    await _render_shipping_request_detail(query, shipping_id)
+
+
+async def _notify_v2_shipping_cancelled(
+    context: ContextTypes.DEFAULT_TYPE,
+    result: dict,
+) -> None:
+    shipping_id = result.get("shipping", {}).get("ID", "")
+    text = with_footer(
+        "📦 <b>Richiesta di spedizione annullata</b>\n\n"
+        f"Richiesta: <code>{escape(shipping_id)}</code>\n\n"
+        "Gli articoli collegati sono nuovamente disponibili."
+    )
+    sent = set()
+    for participant in result.get("participants", []):
+        telegram_id = participant.get("TELEGRAM_ID", "")
+        if not telegram_id or telegram_id in sent:
+            continue
+        sent.add(telegram_id)
+        try:
+            await context.bot.send_message(
+                chat_id=int(telegram_id),
+                text=text,
+                parse_mode="HTML",
+            )
+        except Exception:
+            logger.exception(
+                "Notifica annullamento non inviata a %s",
+                telegram_id,
+            )
+
+
+async def confirm_admin_shipping_cancel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    if not await check_admin(update):
+        return
+    query = update.callback_query
+    shipping_id = (query.data or "").split(":", 1)[-1].strip()
+    try:
+        result = await asyncio.to_thread(
+            cancel_v2_shipping_request_by_admin,
+            shipping_id=shipping_id,
+            admin=str(update.effective_user.id),
+        )
+    except ShippingV2AdminCancelError as error:
+        logger.warning(
+            "Annullamento admin rifiutato per %s: %s",
+            shipping_id,
+            error,
+        )
+        await _admin_error_edit(
+            query,
+            "La richiesta non può essere annullata.",
+            reply_markup=admin_home_keyboard(),
+        )
+        return
+    except Exception:
+        logger.exception(
+            "Errore durante l'annullamento della richiesta %s",
+            shipping_id,
+        )
+        await _admin_error_edit(
+            query,
+            "Impossibile completare l'annullamento. Riprova.",
+            reply_markup=admin_home_keyboard(),
+        )
+        return
+    await _notify_v2_shipping_cancelled(context, result)
+    await _edit_admin_query(
+        query,
+        "✅ <b>Richiesta annullata</b>\n\n"
+        f"Richiesta: <code>{escape(shipping_id)}</code>\n\n"
+        "Tutti gli articoli collegati sono nuovamente disponibili.",
+        reply_markup=admin_back_keyboard("admin_shipping_list"),
     )
 
 
 async def show_shipping_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    data = query.data or ""
+    if ":" not in data or not data.split(":", 1)[1]:
+        await query.answer("Ricevuta non presente.", show_alert=True)
+        return
+    shipping_id = data.split(":", 1)[1]
     if not await check_admin(update):
         return
-    query = update.callback_query
-    await query.answer()
-    shipping_id = query.data.split(":", 1)[1]
-    request = get_shipping_request(shipping_id)
+    request = await asyncio.to_thread(get_shipping_request, shipping_id)
     file_id = request.get("PAYMENT_FILE_ID", "") if request else ""
     if not file_id:
-        await query.answer("Ricevuta non presente.", show_alert=True)
+        await _edit_admin_query(
+            query,
+            "Ricevuta non presente.",
+            reply_markup=admin_home_keyboard(),
+        )
         return
     try:
         note_text = request.get("NOTE", "").upper() if request else ""
@@ -704,17 +965,24 @@ async def show_shipping_receipt(update: Update, context: ContextTypes.DEFAULT_TY
             )
     except Exception:
         logger.exception("Errore invio allegato")
-        await query.answer("Impossibile aprire la ricevuta.", show_alert=True)
+        await query.message.reply_text("Impossibile aprire la ricevuta.")
 
 
 async def start_tracking_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    data = query.data or ""
+    if ":" not in data or not data.split(":", 1)[1]:
+        await query.answer("Richiesta non trovata.", show_alert=True)
+        return ConversationHandler.END
+    shipping_id = data.split(":", 1)[1]
     if not await check_admin(update):
         return ConversationHandler.END
-    query = update.callback_query
-    await query.answer()
-    shipping_id = query.data.split(":", 1)[1]
-    if not get_shipping_request(shipping_id):
-        await query.answer("Richiesta non trovata.", show_alert=True)
+    if not await asyncio.to_thread(get_shipping_request, shipping_id):
+        await _edit_admin_query(
+            query,
+            "Richiesta non trovata.",
+            reply_markup=admin_home_keyboard(),
+        )
         return ConversationHandler.END
     context.user_data["admin_tracking_shipping_id"] = shipping_id
     await _edit_admin_query(
@@ -736,36 +1004,80 @@ async def receive_tracking(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await _admin_error_reply(message, "Tracking non valido. Riprova.")
         return ADMIN_TRACKING
     shipping_id = context.user_data.get("admin_tracking_shipping_id", "")
-    admin_data = get_admin(user.id) or {}
+    admin_data = await asyncio.to_thread(get_admin, user.id) or {}
     try:
-        request = complete_shipping_request(shipping_id, tracking, admin_data.get("USERNAME") or str(user.id))
+        current_request = await asyncio.to_thread(
+            get_shipping_request,
+            shipping_id,
+        )
+        if not current_request:
+            raise ValueError("Richiesta di spedizione non trovata.")
+        request = await asyncio.to_thread(
+            complete_shipping_request_by_version,
+            current_request,
+            tracking,
+            admin_data.get("USERNAME") or str(user.id),
+        )
+    except ShippingV2TrackingConflictError:
+        await _admin_error_reply(
+            message,
+            "La spedizione è già completata con un tracking differente.",
+        )
+        return ADMIN_TRACKING
     except Exception:
         logger.exception("Errore completamento spedizione")
         await _admin_error_reply(message, "Errore durante il salvataggio. Riprova.")
         return ADMIN_TRACKING
     context.user_data.pop("admin_tracking_shipping_id", None)
     try:
-        shipping_template = get_config_values().get("MSG_SPEDIZIONE", {}).get("value", "").strip()
-        shipping_text = shipping_template or (
-            "📦 <b>La tua spedizione è partita!</b>\n\n"
-            "🆔 <code>{ID}</code>\n🚚 <b>{CORRIERE}</b>\n"
-            "🔎 Tracking: <code>{TRACKING}</code>\n\n"
-            "Trovi tutto nello storico spedizioni."
-        )
+        config = await asyncio.to_thread(get_config_values)
+        shipping_template = config.get("MSG_SPEDIZIONE", {}).get("value", "").strip()
+    except Exception:
+        logger.exception("Configurazione notifica tracking non leggibile")
+        shipping_template = ""
+    shipping_template = shipping_template or (
+        "📦 <b>La tua spedizione è partita!</b>\n\n"
+        "🆔 <code>{ID}</code>\n🚚 <b>{CORRIERE}</b>\n"
+        "🔎 Tracking: <code>{TRACKING}</code>\n\n"
+        "Trovi tutto nello storico spedizioni."
+    )
+    if request.get("VERSIONE_SCHEMA", "").upper() == "V2":
+        participants = request.get("_V2_PARTICIPANTS", [])
+    else:
+        participants = []
+    if not participants:
+        participants = [{
+            "TELEGRAM_ID": request.get("TELEGRAM_ID", ""),
+            "USERNAME": request.get("USERNAME", ""),
+            "RUOLO": "TITOLARE",
+        }]
+    sent_ids = set()
+    for participant in participants:
+        telegram_id = str(participant.get("TELEGRAM_ID", "")).strip()
+        if not telegram_id or telegram_id in sent_ids:
+            continue
+        sent_ids.add(telegram_id)
         shipping_text = (
-            shipping_text
+            shipping_template
             .replace("{ID}", escape(shipping_id))
             .replace("{CORRIERE}", escape(request.get("CORRIERE", "")))
             .replace("{TRACKING}", escape(tracking))
-            .replace("{USERNAME}", escape(request.get("USERNAME", "")))
+            .replace(
+                "{USERNAME}",
+                escape(participant.get("USERNAME", "")),
+            )
         )
-        await context.bot.send_message(
-            int(request["TELEGRAM_ID"]),
-            with_footer(shipping_text),
-            parse_mode="HTML",
-        )
-    except Exception:
-        logger.exception("Notifica tracking non inviata")
+        try:
+            await context.bot.send_message(
+                int(telegram_id),
+                with_footer(shipping_text),
+                parse_mode="HTML",
+            )
+        except Exception:
+            logger.exception(
+                "Notifica tracking non inviata a %s",
+                telegram_id,
+            )
     await _reply_admin_message(
         message,
         f"✅ Spedizione <code>{escape(shipping_id)}</code> aggiornata.\n"
@@ -779,7 +1091,6 @@ async def cancel_tracking_input(update: Update, context: ContextTypes.DEFAULT_TY
     if not await check_admin(update):
         return ConversationHandler.END
     query = update.callback_query
-    await query.answer()
     context.user_data.pop("admin_tracking_shipping_id", None)
     await _edit_admin_query(
         query,

@@ -17,3 +17,17 @@ __pycache__/
 # Sistema operativo
 .DS_Store
 Thumbs.db
+
+# Backup e report locali della migrazione Shipping v2
+shipping_v2_backups/
+migration_shipping_v2_report.json
+migration_shipping_v2_report.txt
+migration_shipping_v2_report_*.json
+migration_shipping_v2_report_*.txt
+
+# Report locali della preparazione alla disattivazione Shipping v2
+shipping_v2_deactivation_report.json
+shipping_v2_deactivation_report.txt
+shipping_v2_deactivation_reports/
+
+*.bak_versione

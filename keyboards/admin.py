@@ -57,11 +57,53 @@ def admin_shipping_list_keyboard(requests: list[dict], history: bool = False) ->
     return InlineKeyboardMarkup(rows)
 
 
-def admin_shipping_detail_keyboard(shipping_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def admin_shipping_detail_keyboard(
+    shipping_id: str,
+    *,
+    allow_v2_cancel: bool = False,
+) -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton("📎 Mostra ricevuta", callback_data=f"admin_shipping_receipt:{shipping_id}")],
         [InlineKeyboardButton("🚚 Inserisci tracking e spedisci", callback_data=f"admin_shipping_tracking:{shipping_id}")],
-        [InlineKeyboardButton("⬅️ Richieste", callback_data="admin_shipping_list")],
+    ]
+    if allow_v2_cancel:
+        rows.append([
+            InlineKeyboardButton(
+                "❌ Annulla richiesta",
+                callback_data=f"admin_shipping_cancel:{shipping_id}",
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton(
+            "⬅️ Richieste",
+            callback_data="admin_shipping_list",
+        )
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_shipping_cancel_confirm_keyboard(
+    shipping_id: str,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "⚠️ Conferma annullamento",
+                callback_data=f"admin_shipping_cancel_confirm:{shipping_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "⬅️ Torna alla richiesta",
+                callback_data=f"admin_shipping_cancel_back:{shipping_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🏠 Pannello Admin",
+                callback_data="admin_home",
+            )
+        ],
     ])
 
 

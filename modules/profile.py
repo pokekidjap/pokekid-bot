@@ -23,7 +23,15 @@ from services.bot_db import (
     get_user_shipping_requests,
     save_profile,
 )
-from services.ui import with_footer
+from services.perf import start_flow
+from services.profiles import is_shipping_profile_complete
+from services.ui import (
+    operation_unavailable,
+    page_title,
+    readable_status,
+    section_title,
+    with_footer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,12 +126,14 @@ def format_profile_data(
         )
 
     text = (
-        "📍 <b>Dati di spedizione salvati</b>\n\n"
-        f"👤 <b>{name}</b>\n"
-        f"📧 {email}\n"
-        f"📞 {phone}\n\n"
-        f"🏠 {address}\n"
-        f"{location_line}"
+        page_title("👤", "Il mio profilo")
+        + "\n\n"
+        + section_title("👤", "Destinatario")
+        + f"\n{name}\n\n"
+        + section_title("📍", "Indirizzo")
+        + f"\n{address}\n{location_line}\n\n"
+        + section_title("📞", "Contatti")
+        + f"\n{phone}\n{email}"
     )
 
     if updated_at:
@@ -176,18 +186,30 @@ def format_profile_review(
     )
 
     return (
-        "📋 <b>Controlla i dati inseriti</b>\n\n"
-        f"👤 <b>{name}</b>\n"
-        f"📧 {email}\n"
-        f"📞 {phone}\n\n"
-        f"🏠 {address}\n"
-        f"📮 {postal_code} {city} ({province})\n\n"
+        page_title("👤", "Il mio profilo")
+        + "\n\n"
+        + section_title("📝", "Controlla i dati inseriti")
+        + "\n\n"
+        + section_title("👤", "Destinatario")
+        + f"\n{name}\n\n"
+        + section_title("📍", "Indirizzo")
+        + f"\n{address}\n{postal_code} {city} ({province})\n\n"
+        + section_title("📞", "Contatti")
+        + f"\n{phone}\n{email}\n\n"
         "Se i dati sono corretti, premi "
         "<b>Salva dati</b>."
     )
 
 
 async def show_profile(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    with start_flow("profile"):
+        await _show_profile(update, context)
+
+
+async def _show_profile(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
@@ -206,27 +228,42 @@ async def show_profile(
 
     except Exception:
         await query.edit_message_text(
-            text=with_footer(
-                "❌ Non è stato possibile leggere il profilo.\n\n"
-                "Riprova tra qualche minuto."
+            text=operation_unavailable(
+                "Non è stato possibile leggere il profilo."
             ),
             reply_markup=profile_back_keyboard(),
             parse_mode="HTML",
         )
         return
 
-    if profile:
+    profile_complete = is_shipping_profile_complete(
+        profile
+    )
+
+    if profile_complete:
         text = with_footer(
-            "👤 <b>Il mio profilo</b>\n\n"
-            "✅ Hai già dei dati di spedizione salvati.\n\n"
-            "Da questa sezione puoi visualizzarli, modificare o cancellare."
+            page_title("👤", "Il mio profilo")
+            + "\n\n"
+            "✅ <b>Profilo di spedizione completo</b>\n\n"
+            "Da questa sezione puoi visualizzare, modificare "
+            "o cancellare i dati."
+        )
+
+    elif profile:
+        text = with_footer(
+            page_title("👤", "Il mio profilo")
+            + "\n\n"
+            "⚠️ <b>Profilo di spedizione da completare</b>\n\n"
+            "Completa i dati richiesti prima di creare una spedizione."
         )
 
     else:
         text = with_footer(
-            "👤 <b>Il mio profilo</b>\n\n"
-            "Non hai ancora inserito i tuoi dati di spedizione.\n\n"
-            "Potrai salvarli per velocizzare le future richieste di spedizione.\n\n"
+            page_title("👤", "Il mio profilo")
+            + "\n\n"
+            "➕ <b>Profilo di spedizione non ancora inserito</b>\n\n"
+            "Inserisci i dati una sola volta per velocizzare "
+            "le future richieste di spedizione.\n\n"
             f"{PRIVACY_TEXT}"
         )
 
@@ -234,6 +271,7 @@ async def show_profile(
         text=text,
         reply_markup=profile_keyboard(
             has_profile=profile is not None,
+            is_complete=profile_complete,
         ),
         parse_mode="HTML",
     )
@@ -258,22 +296,46 @@ async def show_profile_shipping_data(
 
     except Exception:
         await query.edit_message_text(
-            text=with_footer(
-                "❌ Non è stato possibile leggere i dati di spedizione."
+            text=operation_unavailable(
+                "Non è stato possibile leggere i dati di spedizione."
             ),
             reply_markup=profile_back_keyboard(),
             parse_mode="HTML",
         )
         return
 
+    profile_complete = is_shipping_profile_complete(
+        profile
+    )
+
     if not profile:
         await query.edit_message_text(
             text=with_footer(
-                "📍 <b>Dati di spedizione</b>\n\n"
-                "Non risultano dati salvati."
+                page_title("👤", "Il mio profilo")
+                + "\n\n"
+                "➕ <b>Profilo di spedizione non ancora inserito</b>\n\n"
+                "Non risultano dati di spedizione salvati."
             ),
             reply_markup=profile_keyboard(
                 has_profile=False,
+                is_complete=False,
+            ),
+            parse_mode="HTML",
+        )
+        return
+
+    if not profile_complete:
+        await query.edit_message_text(
+            text=with_footer(
+                page_title("👤", "Il mio profilo")
+                + "\n\n"
+                "⚠️ <b>Profilo di spedizione da completare</b>\n\n"
+                "Completa i dati richiesti per visualizzare "
+                "il riepilogo di spedizione."
+            ),
+            reply_markup=profile_keyboard(
+                has_profile=True,
+                is_complete=False,
             ),
             parse_mode="HTML",
         )
@@ -298,7 +360,10 @@ async def ask_profile_delete_confirmation(
 
     await query.edit_message_text(
         text=with_footer(
-            "🗑 <b>Eliminazione dati</b>\n\n"
+            page_title("👤", "Il mio profilo")
+            + "\n\n"
+            + section_title("🗑", "Eliminazione dati")
+            + "\n\n"
             "Confermi di voler eliminare tutti i dati di spedizione salvati?\n\n"
             "Questa operazione non può essere annullata."
         ),
@@ -328,9 +393,8 @@ async def remove_profile(
     except Exception:
         logger.exception("Errore eliminazione profilo %s", user.id)
         await query.edit_message_text(
-            text=with_footer(
-                "❌ Non è stato possibile eliminare i dati salvati.\n\n"
-                "Riprova tra qualche minuto."
+            text=operation_unavailable(
+                "Non è stato possibile eliminare i dati salvati."
             ),
             reply_markup=profile_back_keyboard(),
             parse_mode="HTML",
@@ -339,12 +403,16 @@ async def remove_profile(
 
     if deleted:
         text = with_footer(
+            page_title("👤", "Il mio profilo")
+            + "\n\n"
             "✅ <b>Dati eliminati</b>\n\n"
             "I tuoi dati di spedizione sono stati cancellati correttamente."
         )
 
     else:
         text = with_footer(
+            page_title("👤", "Il mio profilo")
+            + "\n\n"
             "ℹ️ <b>Nessun dato trovato</b>\n\n"
             "Non risultano dati di spedizione salvati."
         )
@@ -353,6 +421,7 @@ async def remove_profile(
         text=text,
         reply_markup=profile_keyboard(
             has_profile=False,
+            is_complete=False,
         ),
         parse_mode="HTML",
     )
@@ -376,9 +445,8 @@ async def show_profile_shipments(
         )
     except Exception:
         await query.edit_message_text(
-            text=with_footer(
-                "⚠️ <b>Impossibile leggere le spedizioni</b>\n\n"
-                "Riprova tra qualche minuto."
+            text=operation_unavailable(
+                "Non è stato possibile leggere le spedizioni."
             ),
             reply_markup=profile_back_keyboard(),
             parse_mode="HTML",
@@ -388,10 +456,9 @@ async def show_profile_shipments(
     if not shipping_requests:
         await query.edit_message_text(
             text=with_footer(
-                "🚚 <b>Le mie spedizioni</b>\n\n"
-                "Non risultano ancora richieste di spedizione.\n\n"
-                "In questa sezione potrai visualizzare lo stato "
-                "delle richieste, il corriere e il tracking."
+                page_title("🚚", "Le mie spedizioni")
+                + "\n\n"
+                "Non risultano ancora spedizioni associate al tuo profilo."
             ),
             reply_markup=profile_back_keyboard(),
             parse_mode="HTML",
@@ -400,25 +467,46 @@ async def show_profile_shipments(
 
     lines = []
     for request in shipping_requests[:15]:
-        icon = "✅" if request.get("STATO") == "SPEDITO" else "🟡"
+        status = str(request.get("STATO", ""))
+        icon = (
+            "✅"
+            if status == "SPEDITO"
+            else "❌"
+            if status == "ANNULLATO"
+            else "🟡"
+        )
         tracking = request.get("TRACKING", "")
         details = [
-            f"🆔 <code>{escape(request.get('ID', ''))}</code>",
-            f"🚚 {escape(request.get('CORRIERE', ''))}",
-            f"📍 {escape(request.get('CITTA', ''))} ({escape(request.get('PROVINCIA', ''))})",
-            f"📋 Stato: <b>{escape(request.get('STATO', ''))}</b>",
+            f"{icon} <b>Spedizione</b>",
+            f"🆔 ID: <code>{escape(request.get('ID', ''))}</code>",
+            f"📋 Stato: <b>{escape(readable_status(status))}</b>",
+            f"🚚 Corriere: {escape(request.get('CORRIERE', ''))}",
         ]
         if tracking:
             details.append(f"🔎 Tracking: <code>{escape(tracking)}</code>")
-        lines.append(f"{icon} " + " · ".join(details))
+        city = str(request.get("CITTA", "")).strip()
+        province = str(request.get("PROVINCIA", "")).strip()
+        destination = city
+        if province:
+            destination = (
+                f"{destination} ({province})"
+                if destination
+                else province
+            )
+        if destination:
+            details.append(
+                f"📍 Destinazione: {escape(destination)}"
+            )
+        lines.append("\n".join(details))
 
     text = with_footer(
-        "🚚 <b>Le mie spedizioni</b>\n\n"
+        page_title("🚚", "Le mie spedizioni")
+        + "\n\n"
         + "\n\n".join(lines)
     )
 
     await query.edit_message_text(
-        text=with_footer(text),
+        text=text,
         reply_markup=profile_back_keyboard(),
         parse_mode="HTML",
     )
@@ -435,10 +523,18 @@ async def start_profile_form(
     await query.answer()
 
     context.user_data["profile_form"] = {}
+    form_title = (
+        "Modifica dati"
+        if query.data == "profile_edit_data"
+        else "Inserimento dati"
+    )
 
     await query.edit_message_text(
         text=with_footer(
-            "👤 <b>Inserimento dati di spedizione</b>\n\n"
+            page_title("👤", "Il mio profilo")
+            + "\n\n"
+            + section_title("📝", form_title)
+            + "\n\n"
             "Scrivi il tuo <b>nome e cognome</b>.\n\n"
             "Esempio:\n"
             "<code>Mario Rossi</code>\n\n"
@@ -754,7 +850,9 @@ async def save_profile_form(
     ):
         await query.edit_message_text(
             text=with_footer(
-                "❌ I dati inseriti risultano incompleti.\n\n"
+                page_title("👤", "Il mio profilo")
+                + "\n\n"
+                "⚠️ <b>Dati incompleti</b>\n\n"
                 "Ricomincia la procedura dal Profilo."
             ),
             reply_markup=profile_back_keyboard(),
@@ -785,9 +883,8 @@ async def save_profile_form(
     except Exception:
         logger.exception("Errore salvataggio profilo %s", user.id)
         await query.edit_message_text(
-            text=with_footer(
-                "❌ Non è stato possibile salvare i dati.\n\n"
-                "Riprova tra qualche minuto."
+            text=operation_unavailable(
+                "Non è stato possibile salvare i dati."
             ),
             reply_markup=profile_back_keyboard(),
             parse_mode="HTML",
@@ -802,12 +899,15 @@ async def save_profile_form(
 
     await query.edit_message_text(
         text=with_footer(
+            page_title("👤", "Il mio profilo")
+            + "\n\n"
             "✅ <b>Dati salvati correttamente</b>\n\n"
             "I tuoi dati di spedizione sono stati registrati.\n\n"
             "Potrai modificarli o cancellarli in qualsiasi momento."
         ),
         reply_markup=profile_keyboard(
             has_profile=True,
+            is_complete=True,
         ),
         parse_mode="HTML",
     )
@@ -829,6 +929,8 @@ async def restart_profile_form(
 
     await query.edit_message_text(
         text=with_footer(
+            page_title("👤", "Il mio profilo")
+            + "\n\n"
             "✏️ <b>Ricomincia inserimento</b>\n\n"
             "Scrivi nuovamente il tuo <b>nome e cognome</b>."
         ),
@@ -857,6 +959,8 @@ async def cancel_profile_form(
 
         await query.edit_message_text(
             text=with_footer(
+                page_title("👤", "Il mio profilo")
+                + "\n\n"
                 "❌ <b>Inserimento annullato</b>\n\n"
                 "Nessun dato è stato salvato."
             ),
@@ -866,10 +970,13 @@ async def cancel_profile_form(
 
     elif update.message:
         await update.message.reply_text(
-            text=(
-                "❌ Inserimento annullato.\n\n"
+            text=with_footer(
+                page_title("👤", "Il mio profilo")
+                + "\n\n"
+                "❌ <b>Inserimento annullato</b>\n\n"
                 "Nessun dato è stato salvato."
-            )
+            ),
+            parse_mode="HTML",
         )
 
     return ConversationHandler.END

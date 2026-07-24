@@ -31,6 +31,9 @@ from modules.admin import (
     cancel_broadcast,
     receive_message_edit,
     receive_tracking,
+    confirm_admin_shipping_cancel,
+    return_admin_shipping_detail,
+    show_admin_shipping_cancel_confirmation,
     show_admin_home,
     show_admin_messages,
     show_admin_notifications,
@@ -90,14 +93,34 @@ from modules.profile import (
 from modules.shipping import (
     SHIPPING_PAYMENT_RECEIPT,
     cancel_shipping_receipt,
+    cancel_shipping_receipt_command,
     invalid_shipping_receipt,
     receive_shipping_receipt,
     start_shipping_payment,
 )
+from modules.shipping_v2 import (
+    cancel_v2_shipping,
+    change_v2_items_page,
+    continue_v2_shipping,
+    resume_v2_shipping,
+    select_v2_shipping_carrier,
+    toggle_v2_available_item,
+)
+from modules.shipping_v2_join import (
+    SHIPPING_V2_JOIN_USERNAME,
+    cancel_shipping_v2_join,
+    change_shipping_v2_join_page,
+    confirm_shipping_v2_join,
+    receive_shipping_v2_join_username,
+    refresh_shipping_v2_join,
+    start_shipping_v2_join,
+    toggle_shipping_v2_join_item,
+)
 from services.bot_db import get_admins, get_config_values, is_admin
 from services.profiles import sync_basic_profile
 from services.startup import run_startup_checks
-from services.ui import BOT_VERSION, LAST_UPDATE, compact_error, with_footer
+from services.bot_version import get_bot_version, load_bot_version
+from services.ui import LAST_UPDATE, compact_error, with_footer
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -105,32 +128,36 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-HOME_TEXT = with_footer(
+HOME_BODY = (
     "🏠 <b>Menu principale</b>\n\n"
+    "Gestisci ordini, SUB Grading, profilo e spedizioni.\n\n"
     "Scegli una sezione:"
 )
 
-INFO_TEXT = with_footer(
-    "🤖 <b>Pokekid Bot</b>\n\n"
-    f"Versione {BOT_VERSION}\n\n"
-    f"Ultimo aggiornamento:\n{LAST_UPDATE}"
-)
+
+def get_info_text() -> str:
+    return with_footer(
+        "🤖 <b>Pokekid Bot</b>\n\n"
+        f"Versione {get_bot_version()}\n\n"
+        f"Ultimo aggiornamento:\n{LAST_UPDATE}"
+    )
 
 
-def get_home_text() -> str:
+async def get_home_text() -> str:
     try:
-        custom = get_config_values().get("MSG_BENVENUTO", {}).get("value", "").strip()
+        config_values = await asyncio.to_thread(get_config_values)
+        custom = config_values.get("MSG_BENVENUTO", {}).get("value", "").strip()
     except Exception:
         logger.exception("Impossibile leggere il messaggio di benvenuto")
         custom = ""
     if custom:
         return with_footer(custom)
-    return HOME_TEXT
+    return with_footer(HOME_BODY)
 
 
-def get_home_keyboard(telegram_id: int | str) -> InlineKeyboardMarkup:
+async def get_home_keyboard(telegram_id: int | str) -> InlineKeyboardMarkup:
     rows = [list(row) for row in home_keyboard().inline_keyboard]
-    if is_admin(telegram_id):
+    if await asyncio.to_thread(is_admin, telegram_id):
         rows.append([
             InlineKeyboardButton("🛠️ Pannello Admin", callback_data="admin_home")
         ])
@@ -144,7 +171,11 @@ async def sync_telegram_user(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if user is None:
         return
     try:
-        result = sync_basic_profile(user.id, user.username)
+        result = await asyncio.to_thread(
+            sync_basic_profile,
+            user.id,
+            user.username,
+        )
     except Exception:
         logger.exception("Impossibile sincronizzare il profilo Telegram")
         return
@@ -163,7 +194,8 @@ async def sync_telegram_user(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"Nuovo username: <b>{new_username}</b>\n\n"
         "⚠️ Controlla il foglio ORDINI e aggiorna lo username, se presente."
     )
-    for admin in get_admins(active_only=True):
+    admins = await asyncio.to_thread(get_admins, active_only=True)
+    for admin in admins:
         try:
             await context.bot.send_message(
                 chat_id=int(admin["TELEGRAM_ID"]),
@@ -184,8 +216,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         await sync_telegram_user(update, context)
         await update.message.reply_text(
-            get_home_text(),
-            reply_markup=get_home_keyboard(update.effective_user.id),
+            await get_home_text(),
+            reply_markup=await get_home_keyboard(update.effective_user.id),
             parse_mode="HTML",
         )
 
@@ -194,12 +226,13 @@ async def show_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None:
         return
-    await query.answer()
-    await query.edit_message_text(
-        get_home_text(),
-        reply_markup=get_home_keyboard(query.from_user.id),
-        parse_mode="HTML",
-    )
+    with start_flow("home"):
+        await query.answer()
+        await query.edit_message_text(
+            await get_home_text(),
+            reply_markup=await get_home_keyboard(query.from_user.id),
+            parse_mode="HTML",
+        )
 
 
 async def show_bot_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -208,9 +241,9 @@ async def show_bot_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     await query.answer()
     await query.edit_message_text(
-        INFO_TEXT,
+        get_info_text(),
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Menu", callback_data="menu_home")]
+            [InlineKeyboardButton("⬅️ Indietro", callback_data="menu_home")]
         ]),
         parse_mode="HTML",
     )
@@ -293,7 +326,40 @@ def build_shipping_conversation_handler() -> ConversationHandler:
                 MessageHandler(~filters.COMMAND, invalid_shipping_receipt),
             ]
         },
-        fallbacks=[CallbackQueryHandler(cancel_shipping_receipt, pattern=r"^shipping_receipt_cancel$")],
+        fallbacks=[
+            CallbackQueryHandler(
+                cancel_shipping_receipt,
+                pattern=r"^shipping_receipt_cancel$",
+            ),
+            CommandHandler("cancel", cancel_shipping_receipt_command),
+        ],
+        allow_reentry=True,
+    )
+
+
+def build_shipping_v2_join_conversation_handler() -> ConversationHandler:
+    return ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(
+                start_shipping_v2_join,
+                pattern=r"^shipping_v2_join$",
+            ),
+            CallbackQueryHandler(
+                cancel_shipping_v2_join,
+                pattern=r"^join_v2_cancel$",
+            ),
+        ],
+        states={
+            SHIPPING_V2_JOIN_USERNAME: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    receive_shipping_v2_join_username,
+                )
+            ]
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel_shipping_v2_join),
+        ],
         allow_reentry=True,
     )
 
@@ -358,13 +424,15 @@ async def post_init(application: Application) -> None:
     ])
     if not STARTUP_CHECKS:
         logger.info("Controlli iniziali disattivati da configurazione")
-        return
-    try:
-        await asyncio.to_thread(run_startup_checks)
-    except Exception:
-        logger.exception(
-            "Controlli iniziali non superati. Il bot resta online per consentire il debug."
-        )
+    else:
+        try:
+            await asyncio.to_thread(run_startup_checks)
+        except Exception:
+            logger.exception(
+                "Controlli iniziali non superati. Il bot resta online per consentire il debug."
+            )
+    version = await asyncio.to_thread(load_bot_version)
+    logger.info("Versione bot caricata in memoria: %s", version)
 
 
 def register_handlers(application: Application) -> None:
@@ -374,6 +442,7 @@ def register_handlers(application: Application) -> None:
 
     application.add_handler(build_profile_conversation_handler())
     application.add_handler(build_shipping_conversation_handler())
+    application.add_handler(build_shipping_v2_join_conversation_handler())
     application.add_handler(build_admin_tracking_handler())
     application.add_handler(build_admin_broadcast_handler())
     application.add_handler(build_admin_message_handler())
@@ -383,9 +452,24 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CallbackQueryHandler(continue_shipping_request, pattern=r"^shipping_continue$"))
     application.add_handler(CallbackQueryHandler(select_shipping_carrier, pattern=r"^shipping_carrier:\d+$"))
     application.add_handler(CallbackQueryHandler(cancel_shipping_request, pattern=r"^shipping_cancel$"))
+    application.add_handler(CallbackQueryHandler(toggle_v2_available_item, pattern=r"^order_v2_toggle:ART-[0-9A-Fa-f-]{36}$"))
+    application.add_handler(CallbackQueryHandler(change_v2_items_page, pattern=r"^shipping_v2_page:\d+$"))
+    application.add_handler(CallbackQueryHandler(continue_v2_shipping, pattern=r"^shipping_v2_continue$"))
+    application.add_handler(CallbackQueryHandler(select_v2_shipping_carrier, pattern=r"^shipping_v2_carrier:\d+$"))
+    application.add_handler(CallbackQueryHandler(resume_v2_shipping, pattern=r"^shipping_v2_resume$"))
+    application.add_handler(CallbackQueryHandler(cancel_v2_shipping, pattern=r"^shipping_v2_(?:cancel|cancel_draft|change_items)$"))
+    application.add_handler(CallbackQueryHandler(toggle_shipping_v2_join_item, pattern=r"^join_v2_toggle:ART-[0-9A-Fa-f-]{36}$"))
+    application.add_handler(CallbackQueryHandler(change_shipping_v2_join_page, pattern=r"^join_v2_page:\d+$"))
+    application.add_handler(CallbackQueryHandler(refresh_shipping_v2_join, pattern=r"^join_v2_refresh$"))
+    application.add_handler(CallbackQueryHandler(confirm_shipping_v2_join, pattern=r"^join_v2_confirm$"))
     application.add_handler(CallbackQueryHandler(open_shipping_request, pattern=r"^admin_shipping_open:.+$"))
     application.add_handler(CallbackQueryHandler(show_shipping_receipt, pattern=r"^admin_shipping_receipt:.+$"))
+    application.add_handler(CallbackQueryHandler(show_admin_shipping_cancel_confirmation, pattern=r"^admin_shipping_cancel:[^:]+$"))
+    application.add_handler(CallbackQueryHandler(confirm_admin_shipping_cancel, pattern=r"^admin_shipping_cancel_confirm:[^:]+$"))
+    application.add_handler(CallbackQueryHandler(return_admin_shipping_detail, pattern=r"^admin_shipping_cancel_back:[^:]+$"))
     application.add_handler(CallbackQueryHandler(show_user_orders_detail, pattern=r"^admin_user_orders:\d+$"))
+    application.add_handler(CallbackQueryHandler(show_available_orders, pattern=r"^orders_refresh$"))
+    application.add_handler(CallbackQueryHandler(show_grading, pattern=r"^grading_refresh$"))
 
     # Deve restare per ultimo: gestisce i callback generici non intercettati prima.
     application.add_handler(CallbackQueryHandler(handle_button))

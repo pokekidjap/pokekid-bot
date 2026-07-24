@@ -4,7 +4,7 @@ Data: 22/07/2026
 INTERVENTI COMPLETATI
 - Interfaccia centralizzata: footer, divisori, errori compatti e pulsanti di ritorno condivisi.
 - Menu utente e amministratore compatti e coerenti.
-- Sincronizzazione profilo su tutti gli aggiornamenti Telegram.
+- Sincronizzazione profilo al comando /start.
 - Notifiche smistamento basate su snapshot reale degli articoli pronti.
 - Broadcast con anteprima, conferma e annullamento.
 - Centro notifiche, statistiche e messaggi CONFIG.
@@ -29,3 +29,22 @@ NON ESEGUITO IN QUESTA FASE
 - Deploy e collaudo reale su Railway.
 
 Questi ultimi controlli richiedono le credenziali dell'ambiente e saranno svolti durante il collaudo con l'utente.
+
+RETTIFICA DOCUMENTALE - 23/07/2026
+- Il controllo AST e la compilazione non rilevano nomi globali mancanti:
+  modules/shipping.py usa start_flow senza importarlo e il flusso ricevuta
+  si interrompe a runtime.
+- grading_refresh non è raggiungibile dalla normale schermata grading perché
+  è registrato solo come fallback della conversazione di ricerca.
+- La creazione della spedizione non riserva o aggiorna le righe ORDINI e non
+  impedisce richieste duplicate sugli stessi articoli.
+- Nessun file Python è stato modificato durante questa rettifica.
+
+PRIMA CORREZIONE BUG - 23/07/2026
+- Import start_flow corretto.
+- grading_refresh registrato prima del router generico.
+- Refresh ordini forzato con invalidazione cache e selezioni coerenti.
+- Cache profili invalidata dopo save_profile().
+- Timestamp di selezione rimosso durante la pulizia della sessione.
+- Definizioni duplicate grading rimosse.
+- La funzione futura di unione spedizioni non è stata implementata.

@@ -1,8 +1,5 @@
-import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
-
-import gspread
 
 from config import BOT_DB_SHEET_ID
 from services.cache import get_or_set, invalidate
@@ -13,9 +10,14 @@ from services.common import (
     normalize_telegram_id,
     normalize_username,
 )
-from services.perf import get_perf_context
-from services.sheets import get_google_credentials
-from services.ui import BOT_VERSION
+from services.google_runtime import (
+    get_spreadsheet,
+    get_worksheet,
+    spreadsheet_operation,
+    worksheet_operation,
+    worksheet_session,
+)
+from services.bot_version import get_bot_version
 
 
 PROFILE_WORKSHEET_NAME = "PROFILI"
@@ -27,24 +29,44 @@ LOG_WORKSHEET_NAME = "LOG"
 ITALY_TIMEZONE = ZoneInfo("Europe/Rome")
 
 
-def _cached_values(cache_key: str, worksheet_factory, force: bool = False) -> list[list[str]]:
+def _bot_db_sheet_id() -> str:
+    if not BOT_DB_SHEET_ID:
+        raise RuntimeError(
+            "BOT_DB_SHEET_ID non configurato."
+        )
+    return BOT_DB_SHEET_ID
+
+
+def _cached_values(
+    cache_key: str,
+    worksheet_name: str,
+    force: bool = False,
+) -> list[list[str]]:
     def loader() -> list[list[str]]:
-        perf = get_perf_context()
-        start = time.perf_counter()
-        values = worksheet_factory().get_all_values()
-        if perf is not None:
-            perf.sheet_call((time.perf_counter() - start) * 1000.0)
-        return values
+        return worksheet_operation(
+            _bot_db_sheet_id(),
+            worksheet_name,
+            lambda worksheet: worksheet.get_all_values(),
+            operation_name=f"lettura scheda {worksheet_name}",
+        )
 
     return get_or_set(cache_key, loader, force=force)
 
 
 def get_profile_values(force_refresh: bool = False) -> list[list[str]]:
-    return _cached_values("profiles", get_profiles_worksheet, force=force_refresh)
+    return _cached_values(
+        "profiles",
+        PROFILE_WORKSHEET_NAME,
+        force=force_refresh,
+    )
 
 
 def get_shipping_values(force_refresh: bool = False) -> list[list[str]]:
-    return _cached_values("shipping", get_shipping_worksheet, force=force_refresh)
+    return _cached_values(
+        "shipping",
+        SHIPPING_WORKSHEET_NAME,
+        force=force_refresh,
+    )
 
 
 def _parse_shipping_headers(values: list[list[str]]) -> list[str]:
@@ -86,62 +108,31 @@ def get_current_datetime() -> str:
 
 
 
-def get_bot_db_spreadsheet() -> gspread.Spreadsheet:
+def get_bot_db_spreadsheet():
     """
     Apre il Google Sheets dedicato al database del bot.
 
     Utilizza le stesse credenziali Google già usate
     per il foglio principale degli ordini.
     """
-    if not BOT_DB_SHEET_ID:
-        raise RuntimeError(
-            "BOT_DB_SHEET_ID non configurato."
-        )
-
-    credentials = get_google_credentials()
-
-    client = gspread.authorize(
-        credentials
+    return get_spreadsheet(
+        _bot_db_sheet_id()
     )
-
-    try:
-        spreadsheet = client.open_by_key(
-            BOT_DB_SHEET_ID
-        )
-
-    except gspread.exceptions.SpreadsheetNotFound as error:
-        raise RuntimeError(
-            "Il Google Sheets BOT DB non è stato trovato. "
-            "Controlla BOT_DB_SHEET_ID e verifica che il foglio "
-            "sia condiviso con l'email del Service Account."
-        ) from error
-
-    return spreadsheet
 
 
 def get_bot_db_worksheet(
     worksheet_name: str,
-) -> gspread.Worksheet:
+):
     """
     Restituisce una specifica scheda del BOT DB.
     """
-    spreadsheet = get_bot_db_spreadsheet()
-
-    try:
-        worksheet = spreadsheet.worksheet(
-            worksheet_name
-        )
-
-    except gspread.exceptions.WorksheetNotFound as error:
-        raise RuntimeError(
-            f"La scheda '{worksheet_name}' non esiste "
-            "nel Google Sheets BOT DB."
-        ) from error
-
-    return worksheet
+    return get_worksheet(
+        _bot_db_sheet_id(),
+        worksheet_name,
+    )
 
 
-def get_profiles_worksheet() -> gspread.Worksheet:
+def get_profiles_worksheet():
     """
     Restituisce la scheda PROFILI.
     """
@@ -150,7 +141,7 @@ def get_profiles_worksheet() -> gspread.Worksheet:
     )
 
 
-def get_admin_worksheet() -> gspread.Worksheet:
+def get_admin_worksheet():
     """
     Restituisce la scheda ADMIN.
     """
@@ -159,7 +150,7 @@ def get_admin_worksheet() -> gspread.Worksheet:
     )
 
 
-def get_shipping_worksheet() -> gspread.Worksheet:
+def get_shipping_worksheet():
     """
     Restituisce la scheda SPEDIZIONI.
     """
@@ -168,7 +159,7 @@ def get_shipping_worksheet() -> gspread.Worksheet:
     )
 
 
-def get_config_worksheet() -> gspread.Worksheet:
+def get_config_worksheet():
     """
     Restituisce la scheda CONFIG.
     """
@@ -177,7 +168,7 @@ def get_config_worksheet() -> gspread.Worksheet:
     )
 
 
-def get_log_worksheet() -> gspread.Worksheet:
+def get_log_worksheet():
     """
     Restituisce la scheda LOG.
     """
@@ -193,11 +184,14 @@ def test_bot_db_connection() -> list[str]:
     Restituisce i nomi delle schede presenti
     e controlla che esistano tutte quelle richieste.
     """
-    spreadsheet = get_bot_db_spreadsheet()
-
+    worksheets = spreadsheet_operation(
+        _bot_db_sheet_id(),
+        lambda spreadsheet: spreadsheet.worksheets(),
+        operation_name="elenco schede BOT DB",
+    )
     worksheet_names = [
         worksheet.title
-        for worksheet in spreadsheet.worksheets()
+        for worksheet in worksheets
     ]
 
     required_worksheets = {
@@ -235,7 +229,10 @@ def get_admins(
     Se active_only è True, restituisce solamente
     gli amministratori con ATTIVO impostato su TRUE.
     """
-    values = _cached_values("admins", get_admin_worksheet)
+    values = _cached_values(
+        "admins",
+        ADMIN_WORKSHEET_NAME,
+    )
 
     if len(values) < 2:
         return []
@@ -362,24 +359,10 @@ def is_owner(
     ) == "OWNER"
 
 
-def get_profile(
-    telegram_id: int | str,
+def _find_profile_in_values(
+    telegram_id: str,
+    values: list[list[str]],
 ) -> dict | None:
-    """
-    Cerca un profilo tramite Telegram ID.
-
-    Restituisce un dizionario con i dati del profilo
-    oppure None se l'utente non è presente.
-    """
-    telegram_id = normalize_telegram_id(
-        telegram_id
-    )
-
-    if not telegram_id:
-        return None
-
-    values = get_profile_values()
-
     if len(values) < 2:
         return None
 
@@ -415,6 +398,31 @@ def get_profile(
             return row
 
     return None
+
+
+def get_profile(
+    telegram_id: int | str,
+    force_refresh: bool = False,
+) -> dict | None:
+    """
+    Cerca un profilo tramite Telegram ID.
+
+    Restituisce un dizionario con i dati del profilo
+    oppure None se l'utente non è presente.
+    """
+    telegram_id = normalize_telegram_id(
+        telegram_id
+    )
+
+    if not telegram_id:
+        return None
+
+    return _find_profile_in_values(
+        telegram_id,
+        get_profile_values(
+            force_refresh=force_refresh,
+        ),
+    )
 
 
 def save_profile(
@@ -524,30 +532,46 @@ def save_profile(
         updated_at,
     ]
 
-    worksheet = get_profiles_worksheet()
-    existing_profile = get_profile(
-        telegram_id
-    )
-
-    if existing_profile:
-        row_number = existing_profile[
-            "_ROW_NUMBER"
-        ]
-
-        worksheet.update(
-            range_name=f"A{row_number}:J{row_number}",
-            values=[row_data],
+    with worksheet_session(
+        _bot_db_sheet_id(),
+        PROFILE_WORKSHEET_NAME,
+    ) as session:
+        profile_values = session.call(
+            lambda worksheet: worksheet.get_all_values(),
+            operation_name="lettura profilo da salvare",
+        )
+        existing_profile = _find_profile_in_values(
+            telegram_id,
+            profile_values,
         )
 
-        action = "PROFILO_AGGIORNATO"
+        if existing_profile:
+            row_number = existing_profile[
+                "_ROW_NUMBER"
+            ]
 
-    else:
-        worksheet.append_row(
-            row_data,
-            value_input_option="USER_ENTERED",
-        )
+            session.call(
+                lambda worksheet: worksheet.update(
+                    range_name=f"A{row_number}:J{row_number}",
+                    values=[row_data],
+                ),
+                operation_name="aggiornamento profilo",
+            )
 
-        action = "PROFILO_CREATO"
+            action = "PROFILO_AGGIORNATO"
+
+        else:
+            session.call(
+                lambda worksheet: worksheet.append_row(
+                    row_data,
+                    value_input_option="USER_ENTERED",
+                ),
+                operation_name="creazione profilo",
+            )
+
+            action = "PROFILO_CREATO"
+
+    invalidate("profiles")
 
     write_log(
         telegram_id=telegram_id,
@@ -590,21 +614,32 @@ def delete_profile(
     if not telegram_id:
         return False
 
-    existing_profile = get_profile(
-        telegram_id
-    )
+    with worksheet_session(
+        _bot_db_sheet_id(),
+        PROFILE_WORKSHEET_NAME,
+    ) as session:
+        profile_values = session.call(
+            lambda worksheet: worksheet.get_all_values(),
+            operation_name="lettura profilo da eliminare",
+        )
+        existing_profile = _find_profile_in_values(
+            telegram_id,
+            profile_values,
+        )
 
-    if not existing_profile:
-        return False
+        if not existing_profile:
+            return False
 
-    row_number = existing_profile[
-        "_ROW_NUMBER"
-    ]
+        row_number = existing_profile[
+            "_ROW_NUMBER"
+        ]
 
-    worksheet = get_profiles_worksheet()
-    worksheet.delete_rows(
-        row_number
-    )
+        session.call(
+            lambda worksheet: worksheet.delete_rows(
+                row_number
+            ),
+            operation_name="eliminazione profilo",
+        )
 
     invalidate("profiles")
 
@@ -642,8 +677,6 @@ def write_log(
     Struttura prevista:
     DATA | TELEGRAM_ID | USERNAME | AZIONE | DETTAGLI | ADMIN
     """
-    worksheet = get_log_worksheet()
-
     row_data = [
         get_current_datetime(),
         normalize_telegram_id(
@@ -663,9 +696,14 @@ def write_log(
         ),
     ]
 
-    worksheet.append_row(
-        row_data,
-        value_input_option="USER_ENTERED",
+    worksheet_operation(
+        _bot_db_sheet_id(),
+        LOG_WORKSHEET_NAME,
+        lambda worksheet: worksheet.append_row(
+            row_data,
+            value_input_option="USER_ENTERED",
+        ),
+        operation_name="scrittura log",
     )
     invalidate("logs")
 def get_config_values() -> dict:
@@ -678,7 +716,10 @@ def get_config_values() -> dict:
     oppure:
     CHIAVE | VALORE | ATTIVO
     """
-    values = _cached_values("config", get_config_worksheet)
+    values = _cached_values(
+        "config",
+        CONFIG_WORKSHEET_NAME,
+    )
 
     if len(values) < 2:
         return {}
@@ -808,12 +849,12 @@ def generate_shipping_id() -> str:
     Esempio:
     SP-20260722-001
     """
-    worksheet = get_shipping_worksheet()
-    perf = get_perf_context()
-    start = time.perf_counter()
-    values = worksheet.col_values(1)
-    if perf is not None:
-        perf.sheet_call((time.perf_counter() - start) * 1000.0)
+    values = worksheet_operation(
+        _bot_db_sheet_id(),
+        SHIPPING_WORKSHEET_NAME,
+        lambda worksheet: worksheet.col_values(1),
+        operation_name="lettura ID spedizioni",
+    )
 
     date_prefix = datetime.now(
         ITALY_TIMEZONE
@@ -910,23 +951,13 @@ def create_shipping_request(
             "Allegato pagamento mancante."
         )
 
-    required_profile_fields = {
-        "NOME",
-        "EMAIL",
-        "TELEFONO",
-        "INDIRIZZO",
-        "CAP",
-        "CITTA",
-        "PROVINCIA",
-    }
+    # Import locale per evitare il ciclo: services.profiles usa le funzioni
+    # di persistenza definite in questo modulo.
+    from services.profiles import get_missing_shipping_profile_fields
 
-    missing_fields = [
-        field
-        for field in required_profile_fields
-        if not clean_value(
-            profile.get(field, "")
-        )
-    ]
+    missing_fields = get_missing_shipping_profile_fields(
+        profile
+    )
 
     if missing_fields:
         raise ValueError(
@@ -977,15 +1008,15 @@ def create_shipping_request(
         shipping_cost,
     ]
 
-    worksheet = get_shipping_worksheet()
-    perf = get_perf_context()
-    start = time.perf_counter()
-    worksheet.append_row(
-        row_data,
-        value_input_option="USER_ENTERED",
+    worksheet_operation(
+        _bot_db_sheet_id(),
+        SHIPPING_WORKSHEET_NAME,
+        lambda worksheet: worksheet.append_row(
+            row_data,
+            value_input_option="USER_ENTERED",
+        ),
+        operation_name="creazione richiesta spedizione",
     )
-    if perf is not None:
-        perf.sheet_call((time.perf_counter() - start) * 1000.0)
 
     invalidate("shipping")
     write_log(
@@ -1153,6 +1184,17 @@ def get_shipping_request(
 
     values = get_shipping_values()
 
+    return _find_shipping_request_in_values(
+        shipping_id,
+        values,
+    )
+
+
+def _find_shipping_request_in_values(
+    shipping_id: str,
+    values: list[list[str]],
+) -> dict | None:
+
     if len(values) < 2:
         return None
 
@@ -1209,44 +1251,54 @@ def complete_shipping_request(
             "Tracking mancante."
         )
 
-    existing_request = get_shipping_request(
-        shipping_id
-    )
-
-    if not existing_request:
-        raise ValueError(
-            "Richiesta di spedizione non trovata."
+    with worksheet_session(
+        _bot_db_sheet_id(),
+        SHIPPING_WORKSHEET_NAME,
+    ) as session:
+        shipping_values = session.call(
+            lambda worksheet: worksheet.get_all_values(),
+            operation_name="lettura spedizione da completare",
+        )
+        existing_request = _find_shipping_request_in_values(
+            shipping_id,
+            shipping_values,
         )
 
-    row_number = existing_request[
-        "_ROW_NUMBER"
-    ]
+        if not existing_request:
+            raise ValueError(
+                "Richiesta di spedizione non trovata."
+            )
 
-    current_datetime = get_current_datetime()
+        row_number = existing_request[
+            "_ROW_NUMBER"
+        ]
 
-    # Colonne F:M:
-    # STATO, CORRIERE, TRACKING, PAYMENT_FILE_ID,
-    # NOTE, DATA_SPEDIZIONE, ULTIMO_AGGIORNAMENTO, ADMIN
-    updated_values = [[
-        "SPEDITO",
-        existing_request.get("CORRIERE", ""),
-        tracking,
-        existing_request.get("PAYMENT_FILE_ID", ""),
-        existing_request.get("NOTE", ""),
-        current_datetime,
-        current_datetime,
-        admin,
-    ]]
+        current_datetime = get_current_datetime()
 
-    worksheet = get_shipping_worksheet()
+        # Colonne F:M:
+        # STATO, CORRIERE, TRACKING, PAYMENT_FILE_ID,
+        # NOTE, DATA_SPEDIZIONE, ULTIMO_AGGIORNAMENTO, ADMIN
+        updated_values = [[
+            "SPEDITO",
+            existing_request.get("CORRIERE", ""),
+            tracking,
+            existing_request.get("PAYMENT_FILE_ID", ""),
+            existing_request.get("NOTE", ""),
+            current_datetime,
+            current_datetime,
+            admin,
+        ]]
 
-    worksheet.update(
-        range_name=(
-            f"F{row_number}:M{row_number}"
-        ),
-        values=updated_values,
-        value_input_option="USER_ENTERED",
-    )
+        session.call(
+            lambda worksheet: worksheet.update(
+                range_name=(
+                    f"F{row_number}:M{row_number}"
+                ),
+                values=updated_values,
+                value_input_option="USER_ENTERED",
+            ),
+            operation_name="completamento spedizione",
+        )
 
     invalidate("shipping")
     write_log(
@@ -1281,23 +1333,49 @@ def complete_shipping_request(
 
 def set_config_value(key: str, value: str, active: str | bool | None = None) -> None:
     key = clean_value(key).upper()
-    worksheet = get_config_worksheet()
-    values = worksheet.get_all_values()
-    if not values:
-        worksheet.append_row(["A - CHIAVE", "B - VALORE", "C - ATTIVO"])
-        values = worksheet.get_all_values()
+    with worksheet_session(
+        _bot_db_sheet_id(),
+        CONFIG_WORKSHEET_NAME,
+    ) as session:
+        values = session.call(
+            lambda worksheet: worksheet.get_all_values(),
+            operation_name="lettura configurazione",
+        )
+        if not values:
+            session.call(
+                lambda worksheet: worksheet.append_row(
+                    ["A - CHIAVE", "B - VALORE", "C - ATTIVO"]
+                ),
+                operation_name="inizializzazione configurazione",
+            )
+            values = session.call(
+                lambda worksheet: worksheet.get_all_values(),
+                operation_name="rilettura configurazione",
+            )
 
-    for row_number, row in enumerate(values[1:], start=2):
-        current_key = clean_value(row[0] if row else "").upper()
-        if current_key == key:
-            current_active = row[2] if len(row) > 2 else ""
-            final_active = current_active if active is None else ("TRUE" if active is True else "FALSE" if active is False else clean_value(active))
-            worksheet.update(range_name=f"A{row_number}:C{row_number}", values=[[key, clean_value(value), final_active]])
-            invalidate("config")
-            return
+        for row_number, row in enumerate(values[1:], start=2):
+            current_key = clean_value(row[0] if row else "").upper()
+            if current_key == key:
+                current_active = row[2] if len(row) > 2 else ""
+                final_active = current_active if active is None else ("TRUE" if active is True else "FALSE" if active is False else clean_value(active))
+                session.call(
+                    lambda worksheet: worksheet.update(
+                        range_name=f"A{row_number}:C{row_number}",
+                        values=[[key, clean_value(value), final_active]],
+                    ),
+                    operation_name="aggiornamento configurazione",
+                )
+                invalidate("config")
+                return
 
-    final_active = "" if active is None else ("TRUE" if active is True else "FALSE" if active is False else clean_value(active))
-    worksheet.append_row([key, clean_value(value), final_active], value_input_option="USER_ENTERED")
+        final_active = "" if active is None else ("TRUE" if active is True else "FALSE" if active is False else clean_value(active))
+        session.call(
+            lambda worksheet: worksheet.append_row(
+                [key, clean_value(value), final_active],
+                value_input_option="USER_ENTERED",
+            ),
+            operation_name="creazione configurazione",
+        )
     invalidate("config")
 
 
@@ -1331,13 +1409,16 @@ def get_bot_status() -> dict:
         "shipping_pending": sum(1 for x in shipments if x.get("STATO") == "IN_ATTESA"),
         "shipping_sent": sum(1 for x in shipments if x.get("STATO") == "SPEDITO"),
         "sorting": is_sorting_active(),
-        "version": BOT_VERSION,
+        "version": get_bot_version(),
     }
 
 
 def get_recent_logs(limit: int = 15) -> list[dict]:
     """Restituisce gli ultimi eventi del foglio LOG, dal più recente."""
-    values = _cached_values("logs", get_log_worksheet)
+    values = _cached_values(
+        "logs",
+        LOG_WORKSHEET_NAME,
+    )
     if len(values) < 2:
         return []
     headers = [clean_value(value).upper() for value in values[0]]

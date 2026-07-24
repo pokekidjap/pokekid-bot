@@ -2,8 +2,18 @@
 
 ## Esito
 
-Il progetto compila correttamente e la struttura generale è coerente con `python-telegram-bot 22.8`.
+Il progetto supera la compilazione sintattica e la struttura generale degli
+handler è compatibile con `python-telegram-bot 22.8`.
 Le modifiche applicate sono conservative: non cambiano i fogli Google né i flussi principali del bot.
+
+Una successiva revisione statica completa del 23/07/2026 ha però rilevato un
+errore a runtime non intercettato dalla compilazione:
+`modules/shipping.py` usa `start_flow` senza importarlo. Il flusso ricevuta
+non può pertanto essere considerato operativo nella build consegnata.
+
+Aggiornamento: l'import mancante e gli altri bug della prima correzione sono
+stati risolti il 23/07/2026; vedere `CHANGELOG.md`. Questa sezione resta come
+traccia dell'esito della revisione precedente.
 
 ## Problema critico rilevato
 
@@ -26,7 +36,7 @@ Azioni necessarie:
 - protezione della lunghezza dei pulsanti con username lunghi;
 - logging al posto delle stampe diagnostiche del foglio ordini;
 - documentazione per installazione locale e Railway;
-- file `.env.example` senza credenziali.
+- regole `.gitignore` per escludere `.env` e `credentials.json`.
 
 ## Controlli eseguiti
 
@@ -37,3 +47,6 @@ Azioni necessarie:
 ## Limite del test
 
 Non è stato eseguito un collegamento reale a Telegram o Google Sheets perché il pacchetto revisionato non contiene credenziali. Il test completo avverrà al primo avvio con le nuove variabili Railway.
+
+Non è presente un file `.env.example` nel pacchetto consegnato. La
+configurazione di esempio è inclusa nel `README.md`.

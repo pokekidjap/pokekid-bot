@@ -1,13 +1,11 @@
 import logging
 
-import gspread
-
 from config import SPREADSHEET_ID
 from services.cache import get_or_set
-from services.retry import call_with_retry
-from services.sheets import (
-    get_google_credentials,
-    normalize_header,
+from services.common import normalize_header
+from services.google_runtime import (
+    get_worksheet,
+    worksheet_operation,
 )
 
 
@@ -32,15 +30,9 @@ def get_grading_worksheet():
             "SPREADSHEET_ID non configurato."
         )
 
-    credentials = get_google_credentials()
-    client = gspread.authorize(credentials)
-    spreadsheet = call_with_retry(
-        lambda: client.open_by_key(SPREADSHEET_ID),
-        operation_name="apertura foglio grading",
-    )
-    return call_with_retry(
-        lambda: spreadsheet.worksheet(GRADING_WORKSHEET_NAME),
-        operation_name="apertura scheda grading",
+    return get_worksheet(
+        SPREADSHEET_ID,
+        GRADING_WORKSHEET_NAME,
     )
 
 
@@ -82,8 +74,12 @@ def _load_grading_records() -> list[dict]:
     La posizione della tabella non è importante:
     può trovarsi anche nelle colonne X, Y, Z e AA.
     """
-    worksheet = get_grading_worksheet()
-    values = call_with_retry(worksheet.get_all_values, operation_name="lettura grading")
+    values = worksheet_operation(
+        SPREADSHEET_ID,
+        GRADING_WORKSHEET_NAME,
+        lambda worksheet: worksheet.get_all_values(),
+        operation_name="lettura grading",
+    )
 
     if not values:
         return []

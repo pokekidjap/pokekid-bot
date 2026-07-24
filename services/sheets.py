@@ -1,33 +1,20 @@
-import json
 import logging
-import time
-from pathlib import Path
-
-import gspread
-from google.oauth2.service_account import Credentials
 
 from config import (
-    GOOGLE_CREDENTIALS_JSON,
     SPREADSHEET_ID,
     WORKSHEET_NAME,
 )
 from services.cache import get_or_set
 from services.common import normalize_header, normalize_username, parse_quantity
-from services.perf import get_perf_context
-from services.retry import call_with_retry
+from services.google_runtime import (
+    get_credentials,
+    get_worksheet as get_runtime_worksheet,
+    worksheet_operation,
+)
 
 logger = logging.getLogger(__name__)
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-CREDENTIALS_FILE = BASE_DIR / "credentials.json"
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
-
-def get_google_credentials() -> Credentials:
+def get_google_credentials():
     """
     Recupera le credenziali Google.
 
@@ -37,48 +24,7 @@ def get_google_credentials() -> Credentials:
     Sul PC:
     usa il file credentials.json.
     """
-    if GOOGLE_CREDENTIALS_JSON:
-        try:
-            credentials_info = json.loads(
-                GOOGLE_CREDENTIALS_JSON
-            )
-
-        except json.JSONDecodeError as error:
-            raise RuntimeError(
-                "La variabile GOOGLE_CREDENTIALS_JSON "
-                "non contiene un JSON valido."
-            ) from error
-
-        private_key = credentials_info.get(
-            "private_key"
-        )
-
-        if private_key:
-            credentials_info["private_key"] = (
-                private_key.replace(
-                    "\\n",
-                    "\n",
-                )
-            )
-
-        return Credentials.from_service_account_info(
-            credentials_info,
-            scopes=SCOPES,
-        )
-
-    if CREDENTIALS_FILE.exists():
-        return Credentials.from_service_account_file(
-            CREDENTIALS_FILE,
-            scopes=SCOPES,
-        )
-
-    raise FileNotFoundError(
-        "Credenziali Google non trovate.\n"
-        f"In locale inserisci credentials.json in: "
-        f"{CREDENTIALS_FILE}\n"
-        "Su Railway configura la variabile "
-        "GOOGLE_CREDENTIALS_JSON."
-    )
+    return get_credentials()
 
 
 def get_worksheet():
@@ -96,31 +42,21 @@ def get_worksheet():
             "WORKSHEET_NAME non configurato."
         )
 
-    credentials = get_google_credentials()
-
-    client = gspread.authorize(credentials)
-    spreadsheet = call_with_retry(
-        lambda: client.open_by_key(SPREADSHEET_ID),
-        operation_name="apertura foglio ordini",
-    )
-    return call_with_retry(
-        lambda: spreadsheet.worksheet(WORKSHEET_NAME),
-        operation_name="apertura scheda ordini",
+    return get_runtime_worksheet(
+        SPREADSHEET_ID,
+        WORKSHEET_NAME,
     )
 
 
 def get_sheet_records(force_refresh: bool = False) -> list[dict]:
     """Legge e normalizza il foglio ORDINI usando cache e retry."""
     def loader() -> list[dict]:
-        perf = get_perf_context()
-        worksheet = get_worksheet()
-        start = time.perf_counter()
-        values = call_with_retry(
-            worksheet.get_all_values,
+        values = worksheet_operation(
+            SPREADSHEET_ID,
+            WORKSHEET_NAME,
+            lambda worksheet: worksheet.get_all_values(),
             operation_name="lettura foglio ordini",
         )
-        if perf is not None:
-            perf.sheet_call((time.perf_counter() - start) * 1000.0)
         if not values:
             logger.info("Il foglio ordini è vuoto.")
             return []
@@ -141,6 +77,7 @@ def get_sheet_records(force_refresh: bool = False) -> list[dict]:
 
 def get_user_orders(
     username: str | None,
+    force_refresh: bool = False,
 ) -> list[dict]:
     """
     Cerca nel foglio tutte le righe associate
@@ -159,7 +96,9 @@ def get_user_orders(
         logger.info("Username Telegram assente.")
         return []
 
-    records = get_sheet_records()
+    records = get_sheet_records(
+        force_refresh=force_refresh
+    )
 
     user_orders = []
 
